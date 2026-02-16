@@ -33,7 +33,9 @@ function Calcular-Mascara24 {
     return "255.255.255.0"
 }
 
-
+# =========================================
+# CONFIGURAR IP SERVIDOR
+# =========================================
 
 function Configurar-IPServidor {
     param([string]$ip)
@@ -41,7 +43,7 @@ function Configurar-IPServidor {
     $mask = Calcular-Mascara24
     $prefix = 24
 
-    $adapter = Get-NetAdapter -Name "Ethernet" -ErrorAction SilentlyContinue
+    $adapter = Get-NetAdapter -Name "Ethernet1" -ErrorAction SilentlyContinue
     if (-not $adapter) {
         Write-Host "No se encontro interfaz Ethernet"
         return
@@ -58,7 +60,9 @@ function Configurar-IPServidor {
     Write-Host "Servidor configurado con IP $ip"
 }
 
-
+# =========================================
+# DHCP
+# =========================================
 
 function DHCP-Instalado {
     (Get-WindowsFeature DHCP).Installed
@@ -115,12 +119,14 @@ function Forzar-InterfazDHCP {
     foreach ($b in $bindings) {
         Set-DhcpServerv4Binding `
             -InterfaceAlias $b.InterfaceAlias `
-            -BindingState ($b.InterfaceAlias -eq "Ethernet")
+            -BindingState ($b.InterfaceAlias -eq "Ethernet1")
     }
     Restart-Service DHCPServer
 }
 
-
+# =========================================
+# CONFIGURAR DHCP
+# =========================================
 
 function Configurar-DHCP {
 
@@ -168,7 +174,9 @@ function Configurar-DHCP {
     Write-Host "Pool desde:" $poolStart
 }
 
-
+# =========================================
+# MONITOREO
+# =========================================
 
 function Monitoreo-DHCP {
 
@@ -197,7 +205,9 @@ function Monitoreo-DHCP {
     }
 }
 
-
+# =========================================
+# MENU
+# =========================================
 
 function Menu {
     do {
