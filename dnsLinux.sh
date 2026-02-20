@@ -232,6 +232,11 @@ instalar_dns() {
     sed -i 's/listen-on port 53 { 127.0.0.1; };/listen-on port 53 { any; };/' /etc/named.conf
     sed -i 's/allow-query     { localhost; };/allow-query     { any; };/' /etc/named.conf
 
+    # Restaurar permisos correctos tras modificar con sed
+    chown root:named /etc/named.conf
+    chmod 640 /etc/named.conf
+    restorecon -v /etc/named.conf 2>/dev/null
+
     log_info "Configurando Firewalld para DNS..."
     firewall-cmd --permanent --add-service=dns
     firewall-cmd --reload
@@ -265,6 +270,9 @@ zone "$DOMINIO" IN {
     allow-update { none; };
 };
 EOF
+    chown root:named "$CONF_MAIN"
+    chmod 640 "$CONF_MAIN"
+    restorecon -v "$CONF_MAIN" 2>/dev/null
 
     log_info "2. Generando archivo de Zona ($ARCHIVO_ZONA)..."
     cat > "$ARCHIVO_ZONA" <<EOF
@@ -299,6 +307,9 @@ zone "$RED_INVERSA" IN {
     allow-update { none; };
 };
 EOF
+        chown root:named "$CONF_MAIN"
+        chmod 640 "$CONF_MAIN"
+        restorecon -v "$CONF_MAIN" 2>/dev/null
     fi
 
     if [ ! -f "$ARCHIVO_ZONA_INVERSA" ]; then
