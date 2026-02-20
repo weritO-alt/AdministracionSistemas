@@ -126,14 +126,51 @@ function Instalar-Rol-DHCP {
 
     Log-Aviso "Verificando DHCP..."
 
-    if ((Get-WindowsFeature DHCP).Installed) { Log-Exito "DHCP ya instalado." }
+    if ((Get-WindowsFeature DHCP).Installed) {
+        Log-Exito "DHCP ya instalado."
+    } else {
+        $resultado = Install-WindowsFeature DHCP -IncludeManagementTools
 
-    else {
+        if ($resultado.Success) {
+            Log-Exito "Instalacion del rol completada."
+        } else {
+            Log-Error "Fallo la instalacion del rol DHCP. Verifica que tengas acceso a archivos de origen o internet."
+            Read-Host "Enter para continuar..."
+            return
+        }
+    }
 
-        Install-WindowsFeature DHCP -IncludeManagementTools
+    # --- AUTORIZACION Y CONFIGURACION POST-INSTALACION (solo una vez) ---
+    Log-Aviso "Ejecutando configuracion post-instalacion de DHCP..."
 
-        Log-Exito "Instalacion completa."
+    # Paso 1: Crear grupos de seguridad que DHCP necesita
+    Log-Aviso "Creando grupos de seguridad DHCP..."
+    netsh dhcp add securitygroups | Out-Null
 
+    # Paso 2: Autorizar el servidor en el dominio/red local
+    Log-Aviso "Autorizando servidor DHCP..."
+    try {
+        $ipServidor = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne "127.0.0.1" } | Select-Object -First 1).IPAddress
+        Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -IPAddress $ipServidor -ErrorAction SilentlyContinue
+        Log-Exito "Servidor DHCP autorizado correctamente."
+    } catch {
+        Log-Aviso "Autorizacion omitida (puede que ya este autorizado o no este en dominio)."
+    }
+
+    # Paso 3: Notificar al Service Control Manager que DHCP ya esta configurado
+    Log-Aviso "Notificando al sistema que DHCP esta listo..."
+    try {
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\ServerManager\ServicingStorage\ServerComponentCache\DHCP" `
+            -Name "InstallState" -Value 1 -ErrorAction SilentlyContinue
+    } catch {}
+
+    # Paso 4: Iniciar el servicio
+    Log-Aviso "Iniciando servicio DHCP..."
+    try {
+        Start-Service DhcpServer -ErrorAction Stop
+        Log-Exito "Servicio DHCP corriendo al 100%."
+    } catch {
+        Log-Error "No se pudo iniciar el servicio: $_"
     }
 
     Read-Host "Enter para continuar..."
@@ -143,6 +180,14 @@ function Instalar-Rol-DHCP {
 
 
 function Configurar-Todo-Scope {
+
+    # Verificar que el servicio DHCP este corriendo antes de configurar
+    $servicio = Get-Service -Name DhcpServer -ErrorAction SilentlyContinue
+    if (-not $servicio -or $servicio.Status -ne "Running") {
+        Log-Error "El servicio DHCP no esta corriendo. Instala y configura DHCP primero (Opcion 1)."
+        Read-Host "Enter para continuar..."
+        return
+    }
 
     Log-Aviso "--- CONFIGURACION DE RED Y SCOPE (DHCP + DNS) ---"
 
@@ -154,7 +199,7 @@ function Configurar-Todo-Scope {
 
 
 
-    $RangoInicio = Pedir-IP-Segura "1. IP Inicio Rango (Server IP)"
+    $RangoInicio = Pedir-IP-Segura "1. IP Inicio Rango"
 
     
 
@@ -168,9 +213,9 @@ function Configurar-Todo-Scope {
 
     }
 
+    $IPServidor = Pedir-IP-Segura "3. IP Estatica del Servidor (fuera del rango DHCP recomendado)"
 
-
-    $Prefijo = Read-Host "3. Prefijo (24, 16, 8) [Default: 24]"
+    $Prefijo = Read-Host "4. Prefijo (24, 16, 8) [Default: 24]"
 
     if ($Prefijo -eq "") { $Prefijo = 24 }
 
@@ -178,15 +223,15 @@ function Configurar-Todo-Scope {
 
     
 
-    $Gateway = Pedir-IP-Segura "4. Gateway (Enter para omitir)" "si"
+    $Gateway = Pedir-IP-Segura "5. Gateway (Enter para omitir)" "si"
 
-    $DnsServer = Pedir-IP-Segura "5. DNS (Recomendado: La IP de este servidor)"
+    $DnsServer = Pedir-IP-Segura "6. DNS (Recomendado: La IP de este servidor)"
 
     
 
-    $NombreScope = Read-Host "6. Nombre del Scope"
+    $NombreScope = Read-Host "7. Nombre del Scope"
 
-    $TiempoLease = Pedir-Entero "7. Tiempo Lease (segundos)"
+    $TiempoLease = Pedir-Entero "8. Tiempo Lease (segundos)"
 
 
 
@@ -198,11 +243,11 @@ function Configurar-Todo-Scope {
 
         if ($Gateway) {
 
-            New-NetIPAddress -InterfaceAlias $NombreInterfaz -IPAddress $RangoInicio -PrefixLength $Prefijo -DefaultGateway $Gateway -ErrorAction SilentlyContinue
+            New-NetIPAddress -InterfaceAlias $NombreInterfaz -IPAddress $IPServidor -PrefixLength $Prefijo -DefaultGateway $Gateway -ErrorAction SilentlyContinue
 
         } else {
 
-            New-NetIPAddress -InterfaceAlias $NombreInterfaz -IPAddress $RangoInicio -PrefixLength $Prefijo -ErrorAction SilentlyContinue
+            New-NetIPAddress -InterfaceAlias $NombreInterfaz -IPAddress $IPServidor -PrefixLength $Prefijo -ErrorAction SilentlyContinue
 
         }
 
@@ -239,6 +284,11 @@ function Configurar-Todo-Scope {
         Set-DhcpServerv4OptionValue -ScopeId $netID -OptionId 6 -Value $DnsServer -Force
 
         
+        # Excluir la IP del servidor del rango para evitar conflictos
+        try {
+            Add-DhcpServerv4ExclusionRange -ScopeId $netID -StartRange $IPServidor -EndRange $IPServidor -ErrorAction SilentlyContinue
+            Log-Aviso "IP del servidor ($IPServidor) excluida del rango DHCP."
+        } catch {}
 
         Log-Exito "DNS vinculado correctamente al ambito DHCP."
 
@@ -264,7 +314,21 @@ function Monitorear-Clientes {
 
     Log-Aviso "CLIENTES CONECTADOS (Leases)"
 
-    Get-DhcpServerv4Lease -ScopeId 0.0.0.0 -ErrorAction SilentlyContinue | Select-Object IPAddress, HostName, LeaseExpiryTime | Format-Table -AutoSize
+    # Listar scopes disponibles primero
+    $scopes = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue
+
+    if (-not $scopes) {
+        Log-Error "No hay scopes configurados."
+        Read-Host "Enter para continuar..."
+        return
+    }
+
+    foreach ($scope in $scopes) {
+        Write-Host "`nScope: $($scope.ScopeId) - $($scope.Name)" -ForegroundColor Yellow
+        Get-DhcpServerv4Lease -ScopeId $scope.ScopeId -ErrorAction SilentlyContinue |
+            Select-Object IPAddress, HostName, LeaseExpiryTime |
+            Format-Table -AutoSize
+    }
 
     Read-Host "Enter para continuar..."
 
@@ -285,16 +349,16 @@ function Instalar-DNS {
     Log-Aviso "--- INSTALACION DE DNS ---"
     Log-Aviso "Instalando el rol de DNS y sus herramientas..."
     
-    # Instalacion limpia y nativa (No pide reinicio en un server limpio)
-    Install-WindowsFeature -Name DNS -IncludeManagementTools | Out-Null
+    $resultado = Install-WindowsFeature -Name DNS -IncludeManagementTools
+
+    if ($resultado.Success) {
+        Import-Module DnsServer -ErrorAction SilentlyContinue
+        Start-Service DNS -ErrorAction SilentlyContinue
+        Log-Exito "DNS Instalado y corriendo al 100%."
+    } else {
+        Log-Error "Fallo la instalacion de DNS. Verifica acceso a archivos de origen o internet."
+    }
     
-    # Le decimos a PowerShell que reconozca los comandos en este milisegundo
-    Import-Module DnsServer -ErrorAction SilentlyContinue
-    
-    # Aseguramos que el motor este encendido
-    Start-Service DNS -ErrorAction SilentlyContinue
-    
-    Log-Exito "DNS Instalado y corriendo al 100% sin necesidad de reiniciar."
     Read-Host "Enter para continuar..."
 }
 
@@ -328,7 +392,6 @@ function Agregar-Dominio-DNS {
 function Eliminar-Dominio-DNS {
     Log-Aviso "--- GESTOR ABC: ELIMINAR DOMINIO ---"
     
-    # Listamos los dominios primero para que veas que puedes borrar
     $zonas = Get-DnsServerZone | Where-Object { $_.IsAutoCreated -eq $false -and $_.ZoneName -ne "TrustAnchors" }
     
     if (-not $zonas) { 
@@ -429,7 +492,10 @@ function SubMenu-DHCP {
 
             "3" { Monitorear-Clientes }
 
-            "4" { Uninstall-WindowsFeature DHCP; Log-Exito "Desinstalado." }
+            "4" { 
+                $confirm = Read-Host "Seguro que quieres desinstalar DHCP? (s/n)"
+                if ($confirm -eq "s") { Uninstall-WindowsFeature DHCP; Log-Exito "Desinstalado." }
+            }
 
             "5" { return }
 
@@ -452,7 +518,10 @@ function SubMenu-DNS {
             "2" { Agregar-Dominio-DNS }
             "3" { Listar-Dominios-DNS }
             "4" { Eliminar-Dominio-DNS }
-            "5" { Uninstall-WindowsFeature DNS -Remove; Log-Exito "Desinstalado."; Read-Host "Enter..." }
+            "5" { 
+                $confirm = Read-Host "Seguro que quieres desinstalar DNS? (s/n)"
+                if ($confirm -eq "s") { Uninstall-WindowsFeature DNS -Remove; Log-Exito "Desinstalado."; Read-Host "Enter..." }
+            }
             "6" { return }
         }
     }
