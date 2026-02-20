@@ -522,3 +522,32 @@ desinstalar_dns() {
     fi
     read -p "Enter para continuar..."
 }
+
+check_root
+
+while true; do
+    clear
+    echo "========= SERVIDOR DHCP & DNS ========="
+    echo "1) Instalar DHCP"
+    echo "2) Configurar Scope DHCP"
+    echo "3) Monitorear Clientes DHCP"
+    echo "4) Instalar DNS"
+    echo "5) Agregar Dominio"
+    echo "6) Listar Dominios"
+    echo "7) Validar DNS"
+    echo "8) Salir"
+    echo "========================================"
+    read -p "Selecciona una opción: " op
+
+    case $op in
+        1) instalar_dhcp ;;
+        2) configurar_scope ;;
+        3) monitorear_clientes ;;
+        4) instalar_dns ;;
+        5) agregar_dominio ;;
+        6) listar_dominios ;;
+        7) validar_dns ;;
+        8) exit 0 ;;
+        *) echo "Opción inválida"; sleep 1 ;;
+    esac
+done
