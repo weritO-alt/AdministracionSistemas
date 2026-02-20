@@ -240,20 +240,33 @@ instalar_dns() {
 ZONAS_FILE="/etc/named/custom.zones"
 
 preparar_archivo_zonas() {
-    # Crear directorio si no existe
     mkdir -p /etc/named
 
-    # Crear archivo de zonas si no existe
     if [ ! -f "$ZONAS_FILE" ]; then
         touch "$ZONAS_FILE"
         chown named:named "$ZONAS_FILE"
     fi
 
-    # Agregar include en named.conf si no esta
     if ! grep -q "custom.zones" /etc/named.conf 2>/dev/null; then
         echo 'include "/etc/named/custom.zones";' >> /etc/named.conf
         log_aviso "Archivo de zonas personalizado incluido en named.conf."
     fi
+}
+
+revertir_zona() {
+    # Elimina de forma segura un bloque zone del archivo custom.zones
+    # maneja correctamente llaves anidadas (ej: allow-update { none; };)
+    local dominio="$1"
+    python3 -c "
+import re
+with open('$ZONAS_FILE', 'r') as f:
+    content = f.read()
+# Patron que maneja un nivel de llaves anidadas
+pattern = r'\n*zone\s+\"${dominio}\"\s+IN\s*\{(?:[^{}]|\{[^{}]*\})*\};'
+content = re.sub(pattern, '', content, flags=re.DOTALL)
+with open('$ZONAS_FILE', 'w') as f:
+    f.write(content)
+" 2>/dev/null
 }
 
 agregar_dominio_dns() {
@@ -274,26 +287,15 @@ agregar_dominio_dns() {
         return
     fi
 
-    # Verificar si ya existe en el archivo de zonas
     if grep -q "\"$dominio\"" "$ZONAS_FILE" 2>/dev/null; then
-        log_aviso "El dominio $dominio ya existe."
+        log_aviso "El dominio '$dominio' ya existe."
         read -p "Enter para continuar..."
         return
     fi
 
     ip=$(pedir_ip "IP para este dominio")
 
-    # Agregar zona en archivo de zonas personalizado
-    cat >> "$ZONAS_FILE" <<EOF
-
-zone "${dominio}" IN {
-    type master;
-    file "/var/named/db.${dominio}";
-    allow-update { none; };
-};
-EOF
-
-    # Crear archivo de zona
+    # Crear archivo de zona PRIMERO antes de tocar custom.zones
     cat > /var/named/db.${dominio} <<EOF
 \$TTL 86400
 @   IN  SOA ns1.${dominio}. admin.${dominio}. (
@@ -308,32 +310,58 @@ ns1     IN  A   ${ip}
 @       IN  A   ${ip}
 www     IN  CNAME   ${dominio}.
 EOF
-
     chown named:named /var/named/db.${dominio}
 
-    # Verificar sintaxis
-    log_aviso "Verificando sintaxis de configuracion..."
-    if named-checkconf &>/dev/null; then
-        log_exito "Sintaxis correcta."
-    else
-        log_error "Error de sintaxis. Revisa $ZONAS_FILE manualmente."
+    # Verificar sintaxis del archivo de zona
+    log_aviso "Verificando archivo de zona..."
+    checkzone_out=$(named-checkzone "$dominio" /var/named/db.${dominio} 2>&1)
+    if echo "$checkzone_out" | grep -qi "error\|fatal"; then
+        log_error "Error en el archivo de zona:"
+        echo "$checkzone_out"
+        rm -f /var/named/db.${dominio}
+        read -p "Enter para continuar..."
+        return
+    fi
+    log_exito "Archivo de zona correcto."
+
+    # Agregar el bloque al archivo de zonas
+    cat >> "$ZONAS_FILE" <<EOF
+
+zone "${dominio}" IN {
+    type master;
+    file "/var/named/db.${dominio}";
+    allow-update { none; };
+};
+EOF
+
+    # Mostrar el error real si named-checkconf falla (no silenciarlo)
+    log_aviso "Verificando configuracion global de BIND..."
+    checkconf_out=$(named-checkconf 2>&1)
+    if [ $? -ne 0 ] && echo "$checkconf_out" | grep -qi "error\|fatal"; then
+        log_error "Error en named.conf. Detalle:"
+        echo "$checkconf_out"
+        log_aviso "Revirtiendo cambios..."
+        revertir_zona "$dominio"
+        rm -f /var/named/db.${dominio}
         read -p "Enter para continuar..."
         return
     fi
 
-    if named-checkzone "$dominio" /var/named/db.${dominio} &>/dev/null; then
-        log_exito "Zona correcta."
+    # Reiniciar named y verificar que levanta
+    systemctl restart named
+    sleep 1
+    if systemctl is-active named &>/dev/null; then
+        firewall-cmd --add-service=dns --permanent &>/dev/null
+        firewall-cmd --reload &>/dev/null
+        log_exito "Dominio '$dominio' agregado correctamente con IP $ip."
     else
-        log_error "Error en el archivo de zona."
+        log_error "named no pudo iniciar. Revirtiendo..."
+        journalctl -u named -n 10 --no-pager
+        revertir_zona "$dominio"
+        rm -f /var/named/db.${dominio}
+        systemctl restart named 2>/dev/null
     fi
 
-    systemctl restart named
-
-    # Abrir firewall para DNS
-    firewall-cmd --add-service=dns --permanent &>/dev/null
-    firewall-cmd --reload &>/dev/null
-
-    log_exito "Dominio $dominio agregado correctamente."
     read -p "Enter para continuar..."
 }
 
@@ -342,30 +370,36 @@ eliminar_dominio_dns() {
 
     preparar_archivo_zonas
 
-    dominios=$(grep "^zone" "$ZONAS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"')
+    mapfile -t dominios < <(grep "^zone" "$ZONAS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"')
 
-    if [ -z "$dominios" ]; then
+    if [ "${#dominios[@]}" -eq 0 ]; then
         log_aviso "No hay dominios activos para eliminar."
         read -p "Enter para continuar..."
         return
     fi
 
     log_aviso "Dominios disponibles:"
-    echo "$dominios"
+    for d in "${dominios[@]}"; do echo "  - $d"; done
 
     read -p "Nombre exacto del dominio a eliminar: " dominio
     [ -z "$dominio" ] && return
 
-    if grep -q "\"$dominio\"" "$ZONAS_FILE" 2>/dev/null; then
-        # Eliminar bloque de zona del archivo de zonas
-        sed -i "/zone \"${dominio}\"/,/^};/d" "$ZONAS_FILE"
-        # Eliminar archivo de zona
+    if grep -q "\"${dominio}\"" "$ZONAS_FILE" 2>/dev/null; then
+        revertir_zona "$dominio"
         rm -f /var/named/db.${dominio}
-        systemctl restart named
-        log_exito "Dominio $dominio eliminado."
+
+        checkconf_out=$(named-checkconf 2>&1)
+        if [ $? -eq 0 ] || ! echo "$checkconf_out" | grep -qi "error\|fatal"; then
+            systemctl restart named
+            log_exito "Dominio '$dominio' eliminado correctamente."
+        else
+            log_error "Error en named.conf tras eliminar:"
+            echo "$checkconf_out"
+        fi
     else
-        log_error "Ese dominio no existe."
+        log_error "El dominio '$dominio' no existe en la configuracion."
     fi
+
     read -p "Enter para continuar..."
 }
 
@@ -374,20 +408,22 @@ listar_dominios_dns() {
 
     preparar_archivo_zonas
 
-    dominios=$(grep "^zone" "$ZONAS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"')
+    mapfile -t dominios < <(grep "^zone" "$ZONAS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"')
 
-    if [ -z "$dominios" ]; then
+    if [ "${#dominios[@]}" -eq 0 ]; then
         log_aviso "No hay dominios configurados aun."
         read -p "Enter para continuar..."
         return
     fi
 
-    while IFS= read -r dominio; do
+    for dominio in "${dominios[@]}"; do
         if [ -f "/var/named/db.${dominio}" ]; then
-            ip=$(grep "^@" /var/named/db.${dominio} 2>/dev/null | grep "IN  A" | awk '{print $NF}')
-            echo "$dominio -> ${ip:-Sin IP}"
+            ip=$(awk '/^@[[:space:]]+IN[[:space:]]+A/ {print $NF}' /var/named/db.${dominio} 2>/dev/null)
+            echo "  $dominio -> ${ip:-Sin IP detectada}"
+        else
+            echo "  $dominio -> [ARCHIVO DE ZONA NO ENCONTRADO]"
         fi
-    done <<< "$dominios"
+    done
 
     read -p "Enter para continuar..."
 }
