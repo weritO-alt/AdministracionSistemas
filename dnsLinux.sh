@@ -432,7 +432,8 @@ while true; do
     echo "6. Agregar Dominio y Zona Inversa"
     echo "7. Listar Dominios"
     echo "8. Estado de Servicios"
-    echo "9. Salir"
+    echo "9. Eliminar Dominio"
+    echo "10. Salir"
     echo "------------------------------------------------"
     read -p "Selecciona una opción: " OPCION
 
@@ -445,7 +446,8 @@ while true; do
         6) agregar_dominio ;;
         7) listar_dominios ;;
         8) verificar_servicios ;;
-        9) exit 0 ;;
+        9) eliminar_dominio ;;
+        10) exit 0 ;;
         *) echo "Opción inválida." ;;
     esac
 done
