@@ -96,16 +96,35 @@ function Instalar-Rol {
     Log-Aviso "Verificando rol $Rol..."
     if ((Get-WindowsFeature $Rol).Installed) {
         Log-Exito "$Rol ya esta instalado."
-    } else {
-        try {
-            Install-WindowsFeature -Name $Rol -IncludeManagementTools -ErrorAction Stop | Out-Null
+        Read-Host "Enter para continuar..."
+        return
+    }
+
+    Log-Aviso "Configurando Windows Update como fuente de instalacion..."
+    try {
+        $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Servicing"
+        if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+        Set-ItemProperty -Path $regPath -Name "UseWindowsUpdate" -Value 2 -Force
+        Set-ItemProperty -Path $regPath -Name "LocalSourcePath"  -Value "" -Force
+    } catch {
+        Log-Warn "No se pudo configurar la fuente, se intentara de todos modos..."
+    }
+
+    Log-Aviso "Instalando $Rol (puede tardar unos minutos)..."
+    try {
+        $resultado = Install-WindowsFeature -Name $Rol -IncludeManagementTools -ErrorAction Stop
+        if ($resultado.Success) {
             Import-Module $Rol -ErrorAction SilentlyContinue
             Start-Service $Rol -ErrorAction SilentlyContinue
-            Log-Exito "$Rol instalado y corriendo."
-        } catch {
-            Log-Error "Fallo al instalar $Rol : $_"
+            Log-Exito "$Rol instalado y corriendo correctamente."
+        } else {
+            Log-Error "La instalacion reporto fallo. Revisa que tengas internet activo en el servidor."
         }
+    } catch {
+        Log-Error "Fallo al instalar $Rol : $_"
+        Log-Warn "Asegurate de que el adaptador NAT (Ethernet0) tenga internet y vuelve a intentarlo."
     }
+
     Read-Host "Enter para continuar..."
 }
 
