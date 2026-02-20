@@ -232,11 +232,17 @@ instalar_dns() {
     sed -i 's/listen-on port 53 { 127.0.0.1; };/listen-on port 53 { any; };/' /etc/named.conf
     sed -i 's/allow-query     { localhost; };/allow-query     { any; };/' /etc/named.conf
 
+    # Restaurar permisos correctos tras modificar con sed
+    chown root:named /etc/named.conf
+    chmod 640 /etc/named.conf
+    restorecon -v /etc/named.conf 2>/dev/null
+
     log_info "Configurando Firewalld para DNS..."
     firewall-cmd --permanent --add-service=dns
     firewall-cmd --reload
 
-    systemctl start named
+    systemctl enable named
+    log_ok "BIND listo. Ahora ve a 'Agregar Dominio' para configurar zonas e iniciar el servicio."
     read -p "Enter para continuar..."
 }
 
@@ -265,6 +271,9 @@ zone "$DOMINIO" IN {
     allow-update { none; };
 };
 EOF
+    chown root:named "$CONF_MAIN"
+    chmod 640 "$CONF_MAIN"
+    restorecon -v "$CONF_MAIN" 2>/dev/null
 
     log_info "2. Generando archivo de Zona ($ARCHIVO_ZONA)..."
     cat > "$ARCHIVO_ZONA" <<EOF
@@ -299,6 +308,9 @@ zone "$RED_INVERSA" IN {
     allow-update { none; };
 };
 EOF
+        chown root:named "$CONF_MAIN"
+        chmod 640 "$CONF_MAIN"
+        restorecon -v "$CONF_MAIN" 2>/dev/null
     fi
 
     if [ ! -f "$ARCHIVO_ZONA_INVERSA" ]; then
@@ -333,6 +345,61 @@ EOF
 listar_dominios() {
     log_info "Dominios configurados en /etc/named.conf:"
     grep "zone " /etc/named.conf | awk -F'"' '{print $2}'
+    read -p "Enter para continuar..."
+}
+
+eliminar_dominio() {
+    log_info "--- ELIMINAR DOMINIO ---"
+    log_info "Dominios disponibles:"
+    grep "zone " /etc/named.conf | awk -F'"' '{print $2}' | grep -v "^\.$\|^0\.\|^localhost"
+
+    read -p "Ingresa el dominio a eliminar (ej. carlos.com): " DOMINIO
+    if [ -z "$DOMINIO" ]; then log_error "Dominio inválido."; return; fi
+
+    CONF_MAIN="/etc/named.conf"
+    DIR_ZONAS="/var/named"
+
+    if ! grep -q "zone \"$DOMINIO\"" "$CONF_MAIN"; then
+        log_warn "El dominio $DOMINIO no existe en la configuración."
+        read -p "Enter para continuar..."
+        return
+    fi
+
+    read -p "¿Seguro que deseas eliminar $DOMINIO? (s/n): " CONFIRM
+    if [[ "$CONFIRM" != "s" && "$CONFIRM" != "S" ]]; then
+        log_warn "Operación cancelada."
+        read -p "Enter para continuar..."
+        return
+    fi
+
+    cp "$CONF_MAIN" "$CONF_MAIN.bak"
+
+    sed -i "/^zone \"$DOMINIO\" IN {/,/^};/d" "$CONF_MAIN"
+
+    ARCHIVO_ZONA="$DIR_ZONAS/$DOMINIO.db"
+    if [ -f "$ARCHIVO_ZONA" ]; then
+        IP_SERVIDOR=$(grep "^@.*IN.*A" "$ARCHIVO_ZONA" | awk '{print $NF}' | head -n 1)
+        if [ -n "$IP_SERVIDOR" ]; then
+            IFS='.' read -r ip1 ip2 ip3 ip4 <<< "$IP_SERVIDOR"
+            RED_INVERSA="${ip3}.${ip2}.${ip1}.in-addr.arpa"
+            sed -i "/^zone \"$RED_INVERSA\" IN {/,/^};/d" "$CONF_MAIN"
+            rm -f "$DIR_ZONAS/$ip1.$ip2.$ip3.db"
+            log_ok "Zona inversa $RED_INVERSA eliminada."
+        fi
+        rm -f "$ARCHIVO_ZONA"
+        log_ok "Archivo de zona $ARCHIVO_ZONA eliminado."
+    fi
+
+    chown root:named "$CONF_MAIN"
+    chmod 640 "$CONF_MAIN"
+    restorecon -v "$CONF_MAIN" 2>/dev/null
+
+    systemctl restart named
+    if systemctl is-active --quiet named; then
+        log_ok "Dominio $DOMINIO eliminado y DNS recargado exitosamente."
+    else
+        log_error "Error al recargar DNS. Revisa 'systemctl status named'."
+    fi
     read -p "Enter para continuar..."
 }
 
