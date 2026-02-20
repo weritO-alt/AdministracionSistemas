@@ -435,7 +435,8 @@ function Verificar-Estado-Servicio {
                      elseif ($status.Status -eq "Running")   { "[CORRIENDO]    " }
                      else                                     { "[DETENIDO]     " }
 
-        $color = if ($status.Status -eq "Running") { "Green" } else { "Red" }
+        $colorSvc = if ($status -and $status.Status -eq "Running") { "Green" } else { "Red" }
+        $color = $colorSvc
         Write-Host "$($s.Display.PadRight(15)) : " -NoNewline
         Write-Host $estadoStr -ForegroundColor $color
     }
@@ -529,16 +530,20 @@ while ($true) {
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host "   GESTOR UNIFICADO - WINDOWS SERVER" -ForegroundColor Cyan
     Write-Host "============================================" -ForegroundColor Cyan
+    $colorDHCP = if ($dhcpStatus -eq "ON") { "Green" } else { "Red" }
+    $colorDNS  = if ($dnsStatus  -eq "ON") { "Green" } else { "Red" }
     Write-Host "   DHCP: " -NoNewline
-    Write-Host $dhcpStatus.PadRight(5) -ForegroundColor (if ($dhcpStatus -eq "ON") {"Green"} else {"Red"}) -NoNewline
+    Write-Host $dhcpStatus.PadRight(5) -ForegroundColor $colorDHCP -NoNewline
     Write-Host "   DNS: " -NoNewline
-    Write-Host $dnsStatus -ForegroundColor (if ($dnsStatus -eq "ON") {"Green"} else {"Red"})
+    Write-Host $dnsStatus -ForegroundColor $colorDNS
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "1. Administrar DHCP"
     Write-Host "2. Administrar DNS"
     Write-Host "3. Ver estado general"
-    Write-Host "4. Salir"
+    Write-Host "4. Instalar DHCP (acceso rapido)"
+    Write-Host "5. Instalar DNS  (acceso rapido)"
+    Write-Host "6. Salir"
     Write-Host ""
 
     $op = Read-Host "Opcion"
