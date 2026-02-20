@@ -237,6 +237,25 @@ instalar_dns() {
     read -p "Enter para continuar..."
 }
 
+ZONAS_FILE="/etc/named/custom.zones"
+
+preparar_archivo_zonas() {
+    # Crear directorio si no existe
+    mkdir -p /etc/named
+
+    # Crear archivo de zonas si no existe
+    if [ ! -f "$ZONAS_FILE" ]; then
+        touch "$ZONAS_FILE"
+        chown named:named "$ZONAS_FILE"
+    fi
+
+    # Agregar include en named.conf si no esta
+    if ! grep -q "custom.zones" /etc/named.conf 2>/dev/null; then
+        echo 'include "/etc/named/custom.zones";' >> /etc/named.conf
+        log_aviso "Archivo de zonas personalizado incluido en named.conf."
+    fi
+}
+
 agregar_dominio_dns() {
     log_aviso "--- AGREGAR DOMINIO DNS ---"
 
@@ -246,6 +265,8 @@ agregar_dominio_dns() {
         return
     fi
 
+    preparar_archivo_zonas
+
     read -p "Nombre del dominio (ej. reprobados.com): " dominio
     if [ -z "$dominio" ]; then
         log_error "El dominio no puede estar vacio."
@@ -253,8 +274,8 @@ agregar_dominio_dns() {
         return
     fi
 
-    # Verificar si ya existe
-    if grep -q "\"$dominio\"" /etc/named.conf 2>/dev/null; then
+    # Verificar si ya existe en el archivo de zonas
+    if grep -q "\"$dominio\"" "$ZONAS_FILE" 2>/dev/null; then
         log_aviso "El dominio $dominio ya existe."
         read -p "Enter para continuar..."
         return
@@ -262,8 +283,8 @@ agregar_dominio_dns() {
 
     ip=$(pedir_ip "IP para este dominio")
 
-    # Agregar zona en named.conf
-    cat >> /etc/named.conf <<EOF
+    # Agregar zona en archivo de zonas personalizado
+    cat >> "$ZONAS_FILE" <<EOF
 
 zone "${dominio}" IN {
     type master;
@@ -285,7 +306,7 @@ EOF
 @       IN  NS  ns1.${dominio}.
 ns1     IN  A   ${ip}
 @       IN  A   ${ip}
-www     IN  CNAME ${dominio}.
+www     IN  CNAME   ${dominio}.
 EOF
 
     chown named:named /var/named/db.${dominio}
@@ -295,7 +316,7 @@ EOF
     if named-checkconf &>/dev/null; then
         log_exito "Sintaxis correcta."
     else
-        log_error "Error de sintaxis en named.conf. Revisa manualmente."
+        log_error "Error de sintaxis. Revisa $ZONAS_FILE manualmente."
         read -p "Enter para continuar..."
         return
     fi
@@ -319,7 +340,9 @@ EOF
 eliminar_dominio_dns() {
     log_aviso "--- ELIMINAR DOMINIO DNS ---"
 
-    dominios=$(grep "^zone" /etc/named.conf | grep -v "localhost\|0.in-addr\|." | awk '{print $2}' | tr -d '"')
+    preparar_archivo_zonas
+
+    dominios=$(grep "^zone" "$ZONAS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"')
 
     if [ -z "$dominios" ]; then
         log_aviso "No hay dominios activos para eliminar."
@@ -333,9 +356,9 @@ eliminar_dominio_dns() {
     read -p "Nombre exacto del dominio a eliminar: " dominio
     [ -z "$dominio" ] && return
 
-    if grep -q "\"$dominio\"" /etc/named.conf; then
-        # Eliminar del named.conf
-        sed -i "/zone \"${dominio}\"/,/^};/d" /etc/named.conf
+    if grep -q "\"$dominio\"" "$ZONAS_FILE" 2>/dev/null; then
+        # Eliminar bloque de zona del archivo de zonas
+        sed -i "/zone \"${dominio}\"/,/^};/d" "$ZONAS_FILE"
         # Eliminar archivo de zona
         rm -f /var/named/db.${dominio}
         systemctl restart named
@@ -348,13 +371,24 @@ eliminar_dominio_dns() {
 
 listar_dominios_dns() {
     log_aviso "--- DOMINIOS ACTIVOS ---"
-    while IFS= read -r linea; do
-        dominio=$(echo "$linea" | awk '{print $2}' | tr -d '"')
+
+    preparar_archivo_zonas
+
+    dominios=$(grep "^zone" "$ZONAS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"')
+
+    if [ -z "$dominios" ]; then
+        log_aviso "No hay dominios configurados aun."
+        read -p "Enter para continuar..."
+        return
+    fi
+
+    while IFS= read -r dominio; do
         if [ -f "/var/named/db.${dominio}" ]; then
-            ip=$(grep "^@" /var/named/db.${dominio} | grep "IN  A" | awk '{print $NF}')
+            ip=$(grep "^@" /var/named/db.${dominio} 2>/dev/null | grep "IN  A" | awk '{print $NF}')
             echo "$dominio -> ${ip:-Sin IP}"
         fi
-    done < <(grep "^zone" /etc/named.conf | grep -v "localhost\|0.in-addr")
+    done <<< "$dominios"
+
     read -p "Enter para continuar..."
 }
 
