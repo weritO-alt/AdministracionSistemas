@@ -94,7 +94,6 @@ instalar_dhcp() {
             return
         fi
     fi
-
     log_aviso "Habilitando servicio DHCP..."
     systemctl enable dhcpd
     read -p "Enter para continuar..."
@@ -114,7 +113,6 @@ configurar_scope() {
     read -p "Nombre de la interfaz [Default: ens33]: " interfaz
     [ -z "$interfaz" ] && interfaz="ens33"
 
-    # Verificar si ya tiene IP fija
     ip_actual=$(nmcli -g IP4.ADDRESS device show "$interfaz" 2>/dev/null | cut -d'/' -f1)
     if [ -n "$ip_actual" ]; then
         log_aviso "La interfaz ya tiene IP: $ip_actual"
@@ -153,7 +151,6 @@ configurar_scope() {
     dns=$(pedir_ip "5. DNS (Recomendado: IP de este servidor)")
     tiempo_lease=$(pedir_entero "6. Tiempo Lease (segundos)")
 
-    # Calcular la red
     IFS='.' read -r a b c d <<< "$rango_inicio"
     red="${a}.${b}.${c}.0"
 
@@ -181,7 +178,6 @@ $([ -n "$gateway" ] && echo "    option routers ${gateway};")
 }
 EOF
 
-    # Configurar en que interfaz escucha DHCP
     sed -i "s/^DHCPDARGS=.*/DHCPDARGS=${interfaz}/" /etc/sysconfig/dhcpd 2>/dev/null || \
     echo "DHCPDARGS=${interfaz}" > /etc/sysconfig/dhcpd
 
@@ -192,7 +188,6 @@ EOF
         log_error "El servicio DHCP no pudo iniciar. Revisa /etc/dhcp/dhcpd.conf"
     fi
 
-    # Abrir firewall para DHCP
     firewall-cmd --add-service=dhcp --permanent &>/dev/null
     firewall-cmd --reload &>/dev/null
     log_exito "Firewall configurado para DHCP."
@@ -214,6 +209,8 @@ ver_clientes_dhcp() {
 # 3. MODULO DNS
 # ---------------------------------------------------
 
+ZONAS_FILE="/etc/named/custom.zones"
+
 instalar_dns() {
     clear
     log_aviso "--- INSTALACION DE DNS (BIND9) ---"
@@ -230,43 +227,86 @@ instalar_dns() {
             return
         fi
     fi
-
     systemctl enable named
     systemctl start named
     log_exito "Servicio DNS corriendo."
     read -p "Enter para continuar..."
 }
 
-ZONAS_FILE="/etc/named/custom.zones"
-
 preparar_archivo_zonas() {
     mkdir -p /etc/named
-
     if [ ! -f "$ZONAS_FILE" ]; then
         touch "$ZONAS_FILE"
         chown named:named "$ZONAS_FILE"
     fi
-
     if ! grep -q "custom.zones" /etc/named.conf 2>/dev/null; then
         echo 'include "/etc/named/custom.zones";' >> /etc/named.conf
         log_aviso "Archivo de zonas personalizado incluido en named.conf."
     fi
 }
 
+# Elimina un bloque zone de custom.zones de forma segura.
+# Usa heredoc para pasar el script a python3 y evitar problemas
+# con comillas y variables dentro de -c "..."
 revertir_zona() {
-    # Elimina de forma segura un bloque zone del archivo custom.zones
-    # maneja correctamente llaves anidadas (ej: allow-update { none; };)
     local dominio="$1"
-    python3 -c "
+    python3 - <<PYEOF
 import re
-with open('$ZONAS_FILE', 'r') as f:
+
+dominio = "$dominio"
+zonas_file = "$ZONAS_FILE"
+
+with open(zonas_file, 'r') as f:
     content = f.read()
-# Patron que maneja un nivel de llaves anidadas
-pattern = r'\n*zone\s+\"${dominio}\"\s+IN\s*\{(?:[^{}]|\{[^{}]*\})*\};'
+
+# Patron que maneja llaves anidadas (ej: allow-update { none; };)
+pattern = r'\n*zone\s+"' + re.escape(dominio) + r'"\s+IN\s*\{(?:[^{}]|\{[^{}]*\})*\};'
 content = re.sub(pattern, '', content, flags=re.DOTALL)
-with open('$ZONAS_FILE', 'w') as f:
+
+with open(zonas_file, 'w') as f:
     f.write(content)
-" 2>/dev/null
+print("Revertido: " + dominio)
+PYEOF
+}
+
+# Reconstruye custom.zones desde cero con los archivos de zona validos.
+# Usar esta opcion si named no levanta o custom.zones quedo corrupto.
+reparar_custom_zones() {
+    log_aviso "Reconstruyendo $ZONAS_FILE desde archivos validos en /var/named/..."
+    > "$ZONAS_FILE"
+
+    local reparado=0
+    for archivo in /var/named/db.*; do
+        [ -f "$archivo" ] || continue
+        local dom="${archivo#/var/named/db.}"
+        if named-checkzone "$dom" "$archivo" &>/dev/null; then
+            cat >> "$ZONAS_FILE" <<EOF
+
+zone "${dom}" IN {
+    type master;
+    file "/var/named/db.${dom}";
+    allow-update { none; };
+};
+EOF
+            log_exito "Zona recuperada: $dom"
+            reparado=$((reparado + 1))
+        else
+            log_aviso "Zona omitida (archivo invalido): $dom"
+        fi
+    done
+
+    chown named:named "$ZONAS_FILE"
+    log_exito "Reparacion completada: $reparado zona(s) recuperada(s)."
+
+    systemctl restart named
+    sleep 1
+    if systemctl is-active named &>/dev/null; then
+        log_exito "named reiniciado correctamente."
+    else
+        log_error "named no pudo iniciar. Detalle:"
+        journalctl -u named -n 15 --no-pager
+    fi
+    read -p "Enter para continuar..."
 }
 
 agregar_dominio_dns() {
@@ -295,7 +335,7 @@ agregar_dominio_dns() {
 
     ip=$(pedir_ip "IP para este dominio")
 
-    # Crear archivo de zona PRIMERO antes de tocar custom.zones
+    # PASO 1: Crear archivo de zona
     cat > /var/named/db.${dominio} <<EOF
 \$TTL 86400
 @   IN  SOA ns1.${dominio}. admin.${dominio}. (
@@ -312,10 +352,10 @@ www     IN  CNAME   ${dominio}.
 EOF
     chown named:named /var/named/db.${dominio}
 
-    # Verificar sintaxis del archivo de zona
+    # PASO 2: Validar solo el archivo de zona (no named-checkconf)
     log_aviso "Verificando archivo de zona..."
     checkzone_out=$(named-checkzone "$dominio" /var/named/db.${dominio} 2>&1)
-    if echo "$checkzone_out" | grep -qi "error\|fatal"; then
+    if ! named-checkzone "$dominio" /var/named/db.${dominio} &>/dev/null; then
         log_error "Error en el archivo de zona:"
         echo "$checkzone_out"
         rm -f /var/named/db.${dominio}
@@ -324,7 +364,7 @@ EOF
     fi
     log_exito "Archivo de zona correcto."
 
-    # Agregar el bloque al archivo de zonas
+    # PASO 3: Agregar bloque al archivo de zonas
     cat >> "$ZONAS_FILE" <<EOF
 
 zone "${dominio}" IN {
@@ -334,32 +374,25 @@ zone "${dominio}" IN {
 };
 EOF
 
-    # Mostrar el error real si named-checkconf falla (no silenciarlo)
-    log_aviso "Verificando configuracion global de BIND..."
-    checkconf_out=$(named-checkconf 2>&1)
-    if [ $? -ne 0 ] && echo "$checkconf_out" | grep -qi "error\|fatal"; then
-        log_error "Error en named.conf. Detalle:"
-        echo "$checkconf_out"
-        log_aviso "Revirtiendo cambios..."
-        revertir_zona "$dominio"
-        rm -f /var/named/db.${dominio}
-        read -p "Enter para continuar..."
-        return
-    fi
-
-    # Reiniciar named y verificar que levanta
+    # PASO 4: Reiniciar named y verificar (esta es la validacion real)
+    log_aviso "Reiniciando named..."
     systemctl restart named
     sleep 1
+
     if systemctl is-active named &>/dev/null; then
         firewall-cmd --add-service=dns --permanent &>/dev/null
         firewall-cmd --reload &>/dev/null
         log_exito "Dominio '$dominio' agregado correctamente con IP $ip."
     else
-        log_error "named no pudo iniciar. Revirtiendo..."
-        journalctl -u named -n 10 --no-pager
+        log_error "named no pudo iniciar. Revirtiendo cambios..."
+        echo ""
+        echo "--- Detalle del error de named ---"
+        journalctl -u named -n 20 --no-pager
+        echo "----------------------------------"
         revertir_zona "$dominio"
         rm -f /var/named/db.${dominio}
         systemctl restart named 2>/dev/null
+        log_aviso "Si el error persiste, usa la opcion 'Reparar DNS' en el menu."
     fi
 
     read -p "Enter para continuar..."
@@ -388,13 +421,14 @@ eliminar_dominio_dns() {
         revertir_zona "$dominio"
         rm -f /var/named/db.${dominio}
 
-        checkconf_out=$(named-checkconf 2>&1)
-        if [ $? -eq 0 ] || ! echo "$checkconf_out" | grep -qi "error\|fatal"; then
-            systemctl restart named
+        systemctl restart named
+        sleep 1
+        if systemctl is-active named &>/dev/null; then
             log_exito "Dominio '$dominio' eliminado correctamente."
         else
-            log_error "Error en named.conf tras eliminar:"
-            echo "$checkconf_out"
+            log_error "named no pudo iniciar tras eliminar. Detalle:"
+            journalctl -u named -n 15 --no-pager
+            log_aviso "Usa la opcion 'Reparar DNS' en el menu."
         fi
     else
         log_error "El dominio '$dominio' no existe en la configuracion."
@@ -479,22 +513,24 @@ submenu_dns() {
         echo "2. Agregar Dominio"
         echo "3. Listar Dominios"
         echo "4. Eliminar Dominio"
-        echo "5. Desinstalar"
-        echo "6. Volver"
+        echo "5. Reparar DNS  <-- usar si named no levanta"
+        echo "6. Desinstalar"
+        echo "7. Volver"
         read -p "Opcion: " op
         case "$op" in
             1) instalar_dns ;;
             2) agregar_dominio_dns ;;
             3) listar_dominios_dns ;;
             4) eliminar_dominio_dns ;;
-            5)
+            5) reparar_custom_zones ;;
+            6)
                 read -p "Seguro que quieres desinstalar DNS? (s/n): " confirm
                 if [ "$confirm" == "s" ]; then
                     dnf remove -y bind bind-utils
                     log_exito "DNS desinstalado."
                 fi
                 ;;
-            6) return ;;
+            7) return ;;
         esac
     done
 }
