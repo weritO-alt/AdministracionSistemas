@@ -5,8 +5,8 @@
 # ---------------------------------------------------
 
 log_exito() { echo "[OK] $1"; }
-log_error() { echo "[ERROR] $1"; }
-log_aviso() { echo "[INFO] $1"; }
+log_error() { echo "[ERROR] $1" >&2; }
+log_aviso() { echo "[INFO] $1" >&2; }
 
 verificar_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -149,8 +149,12 @@ configurar_scope() {
 
     gateway=$(pedir_ip "4. Gateway (Enter para omitir)" "si")
 
-    read -p "5. DNS para clientes [Enter para usar IP del servidor: ${ip_servidor}]: " dns
-    [ -z "$dns" ] && dns="$ip_servidor"
+    # DNS primario = siempre la IP del servidor (para resolver dominios locales)
+    # DNS secundario = el que ponga el profesor/usuario (opcional)
+    echo ""
+    echo "[INFO] DNS primario: ${ip_servidor} (este servidor, forzado automaticamente)"
+    dns_secundario=$(pedir_ip "5. DNS Secundario (ej. 8.8.8.8 - Enter para omitir)" "si")
+    echo ""
 
     tiempo_lease=$(pedir_entero "6. Tiempo Lease (segundos)")
 
@@ -163,9 +167,21 @@ configurar_scope() {
     if [ -n "$gateway" ]; then
         nmcli con mod "$interfaz" ipv4.gateway "$gateway"
     fi
-    nmcli con mod "$interfaz" ipv4.dns "$dns"
+    # El servidor siempre se apunta a si mismo como DNS primario
+    if [ -n "$dns_secundario" ]; then
+        nmcli con mod "$interfaz" ipv4.dns "${ip_servidor} ${dns_secundario}"
+    else
+        nmcli con mod "$interfaz" ipv4.dns "${ip_servidor}"
+    fi
     nmcli con up "$interfaz"
     log_exito "IP estatica configurada."
+
+    # Construir linea DNS para dhcpd.conf
+    if [ -n "$dns_secundario" ]; then
+        dns_line="    option domain-name-servers ${ip_servidor}, ${dns_secundario};"
+    else
+        dns_line="    option domain-name-servers ${ip_servidor};"
+    fi
 
     log_aviso "Generando archivo de configuracion DHCP..."
     cat > /etc/dhcp/dhcpd.conf <<EOF
@@ -175,7 +191,7 @@ max-lease-time $((tiempo_lease * 2));
 
 subnet ${red} netmask ${mascara} {
     range ${rango_inicio} ${rango_fin};
-    option domain-name-servers ${dns};
+${dns_line}
     option subnet-mask ${mascara};
 $([ -n "$gateway" ] && echo "    option routers ${gateway};")
 }
@@ -231,7 +247,7 @@ instalar_dns() {
         fi
     fi
 
-    # --- FIX: Configurar named.conf para escuchar en todas las interfaces ---
+    # Configurar named.conf para escuchar en todas las interfaces
     log_aviso "Configurando named.conf para aceptar consultas externas..."
 
     if grep -q "allow-query { any; };" /etc/named.conf &&
@@ -257,27 +273,27 @@ instalar_dns() {
         listen-on port 53 { any; };\
         listen-on-v6 port 53 { any; };' /etc/named.conf
 
-        log_exito "named.conf actualizado."
+        log_exito "named.conf actualizado: acepta consultas de cualquier cliente."
     fi
 
     # Validar que la config quedo bien
-    if named-checkconf /etc/named.conf; then
+    if named-checkconf /etc/named.conf 2>/dev/null; then
         log_exito "Configuracion de named.conf valida."
     else
         log_error "Error en named.conf. Revisa manualmente."
         read -p "Enter para continuar..."
         return
     fi
-    # -----------------------------------------------------------------------
 
     systemctl enable named
-    systemctl start named
+    systemctl restart named
 
     # Abrir firewall para DNS
     firewall-cmd --add-service=dns --permanent &>/dev/null
     firewall-cmd --reload &>/dev/null
     log_exito "Firewall configurado para DNS."
 
+    sleep 1
     if systemctl is-active named &>/dev/null; then
         log_exito "Servicio DNS corriendo."
     else
