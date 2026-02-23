@@ -148,7 +148,10 @@ configurar_scope() {
     esac
 
     gateway=$(pedir_ip "4. Gateway (Enter para omitir)" "si")
-    dns=$(pedir_ip "5. DNS (Recomendado: IP de este servidor)")
+
+    read -p "5. DNS para clientes [Enter para usar IP del servidor: ${ip_servidor}]: " dns
+    [ -z "$dns" ] && dns="$ip_servidor"
+
     tiempo_lease=$(pedir_entero "6. Tiempo Lease (segundos)")
 
     IFS='.' read -r a b c d <<< "$rango_inicio"
@@ -227,9 +230,61 @@ instalar_dns() {
             return
         fi
     fi
+
+    # --- FIX: Configurar named.conf para escuchar en todas las interfaces ---
+    log_aviso "Configurando named.conf para aceptar consultas externas..."
+
+    if grep -q "allow-query { any; };" /etc/named.conf &&
+       grep -q "listen-on port 53 { any; };" /etc/named.conf; then
+        log_exito "named.conf ya tiene la configuracion correcta."
+    else
+        # Limpiar directivas viejas para evitar duplicados
+        sed -i '
+/^[[:space:]]*options[[:space:]]*{/ {
+    :a
+    n
+    /^[[:space:]]*};/ b
+    /allow-query/d
+    /listen-on port/d
+    /listen-on-v6/d
+    ba
+}
+' /etc/named.conf
+
+        # Insertar nuevas directivas dentro del bloque options
+        sed -i '/^[[:space:]]*options[[:space:]]*{/a\
+        allow-query { any; };\
+        listen-on port 53 { any; };\
+        listen-on-v6 port 53 { any; };' /etc/named.conf
+
+        log_exito "named.conf actualizado."
+    fi
+
+    # Validar que la config quedo bien
+    if named-checkconf /etc/named.conf; then
+        log_exito "Configuracion de named.conf valida."
+    else
+        log_error "Error en named.conf. Revisa manualmente."
+        read -p "Enter para continuar..."
+        return
+    fi
+    # -----------------------------------------------------------------------
+
     systemctl enable named
     systemctl start named
-    log_exito "Servicio DNS corriendo."
+
+    # Abrir firewall para DNS
+    firewall-cmd --add-service=dns --permanent &>/dev/null
+    firewall-cmd --reload &>/dev/null
+    log_exito "Firewall configurado para DNS."
+
+    if systemctl is-active named &>/dev/null; then
+        log_exito "Servicio DNS corriendo."
+    else
+        log_error "El servicio named no pudo iniciar."
+        journalctl -u named -n 10 --no-pager
+    fi
+
     read -p "Enter para continuar..."
 }
 
@@ -245,9 +300,6 @@ preparar_archivo_zonas() {
     fi
 }
 
-# Elimina un bloque zone de custom.zones de forma segura.
-# Usa heredoc para pasar el script a python3 y evitar problemas
-# con comillas y variables dentro de -c "..."
 revertir_zona() {
     local dominio="$1"
     python3 - <<PYEOF
@@ -259,7 +311,6 @@ zonas_file = "$ZONAS_FILE"
 with open(zonas_file, 'r') as f:
     content = f.read()
 
-# Patron que maneja llaves anidadas (ej: allow-update { none; };)
 pattern = r'\n*zone\s+"' + re.escape(dominio) + r'"\s+IN\s*\{(?:[^{}]|\{[^{}]*\})*\};'
 content = re.sub(pattern, '', content, flags=re.DOTALL)
 
@@ -269,8 +320,6 @@ print("Revertido: " + dominio)
 PYEOF
 }
 
-# Reconstruye custom.zones desde cero con los archivos de zona validos.
-# Usar esta opcion si named no levanta o custom.zones quedo corrupto.
 reparar_custom_zones() {
     log_aviso "Reconstruyendo $ZONAS_FILE desde archivos validos en /var/named/..."
     > "$ZONAS_FILE"
@@ -335,7 +384,6 @@ agregar_dominio_dns() {
 
     ip=$(pedir_ip "IP para este dominio")
 
-    # PASO 1: Crear archivo de zona
     cat > /var/named/db.${dominio} <<EOF
 \$TTL 86400
 @   IN  SOA ns1.${dominio}. admin.${dominio}. (
@@ -352,7 +400,6 @@ www     IN  CNAME   ${dominio}.
 EOF
     chown named:named /var/named/db.${dominio}
 
-    # PASO 2: Validar solo el archivo de zona (no named-checkconf)
     log_aviso "Verificando archivo de zona..."
     checkzone_out=$(named-checkzone "$dominio" /var/named/db.${dominio} 2>&1)
     if ! named-checkzone "$dominio" /var/named/db.${dominio} &>/dev/null; then
@@ -364,7 +411,6 @@ EOF
     fi
     log_exito "Archivo de zona correcto."
 
-    # PASO 3: Agregar bloque al archivo de zonas
     cat >> "$ZONAS_FILE" <<EOF
 
 zone "${dominio}" IN {
@@ -374,7 +420,6 @@ zone "${dominio}" IN {
 };
 EOF
 
-    # PASO 4: Reiniciar named y verificar (esta es la validacion real)
     log_aviso "Reiniciando named..."
     systemctl restart named
     sleep 1
