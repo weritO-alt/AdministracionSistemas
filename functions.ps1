@@ -1,11 +1,7 @@
 # ============================================================
-# functions.ps1 — Librería central de funciones
+# functions.ps1 - Libreria central de funciones
 # No ejecutar directamente, es llamado por menus.ps1
 # ============================================================
-
-# ────────────────────────────────────────────────────────────
-# LOGS Y VALIDACIONES
-# ────────────────────────────────────────────────────────────
 
 function Log-Exito { param([string]$texto); Write-Host "[OK]    $texto" -ForegroundColor Green }
 function Log-Error { param([string]$texto); Write-Host "[ERROR] $texto" -ForegroundColor Red }
@@ -48,17 +44,6 @@ function Obtener-Mascara-Desde-Prefijo {
     }
 }
 
-function Validar-IP {
-    param([string]$ip)
-    if ($ip -match '^(\d{1,3}\.){3}\d{1,3}$') {
-        foreach ($oct in $ip.Split('.')) {
-            if ([int]$oct -gt 255) { return $false }
-        }
-        return $true
-    }
-    return $false
-}
-
 function Pedir-IP-Segura {
     param([string]$Mensaje, [string]$EsOpcional = "no")
     while ($true) {
@@ -73,23 +58,23 @@ function Pedir-IP-Segura {
     }
 }
 
-# ────────────────────────────────────────────────────────────
-# PRÁCTICA 1 — DIAGNÓSTICO DEL SISTEMA
-# ────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# PRACTICA 1 - DIAGNOSTICO DEL SISTEMA
+# ------------------------------------------------------------
 
 function P1-Mostrar-Info {
     Write-Host ""
     Log-Aviso "=== Informacion del Sistema ==="
-    Write-Host "  Equipo   : $env:COMPUTERNAME" -ForegroundColor White
+    Write-Host "  Equipo : $env:COMPUTERNAME" -ForegroundColor White
 
     $ips = Get-NetIPAddress -AddressFamily IPv4 |
            Where-Object { $_.IPAddress -ne "127.0.0.1" -and $_.PrefixOrigin -ne "WellKnown" } |
            Select-Object -ExpandProperty IPAddress
-    Write-Host "  IPs      : $($ips -join ', ')" -ForegroundColor White
+    Write-Host "  IPs    : $($ips -join ', ')" -ForegroundColor White
 
     Write-Host ""
     Log-Aviso "Espacio en disco:"
-    $disk   = Get-PSDrive C
+    $disk    = Get-PSDrive C
     $totalGB = [math]::Round(($disk.Used + $disk.Free) / 1GB, 2)
     $usedGB  = [math]::Round($disk.Used / 1GB, 2)
     $freeGB  = [math]::Round($disk.Free / 1GB, 2)
@@ -101,9 +86,9 @@ function P1-Mostrar-Info {
     Read-Host "Enter para continuar..."
 }
 
-# ────────────────────────────────────────────────────────────
-# PRÁCTICA 2 — DHCP
-# ────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# PRACTICA 2 - DHCP
+# ------------------------------------------------------------
 
 function Instalar-Rol-DHCP {
     Log-Aviso "Verificando DHCP..."
@@ -180,8 +165,8 @@ function Configurar-Todo-Scope {
     $DnsSecundario = Pedir-IP-Segura "6. DNS Secundario (ej. 8.8.8.8 - Enter para omitir)" "si"
     Write-Host ""
 
-    $NombreScope  = Read-Host "7. Nombre del Scope"
-    $TiempoLease  = Pedir-Entero "8. Tiempo Lease (segundos)"
+    $NombreScope = Read-Host "7. Nombre del Scope"
+    $TiempoLease = Pedir-Entero "8. Tiempo Lease (segundos)"
 
     Log-Aviso "Configurando IP Estatica en la interfaz..."
     try {
@@ -249,9 +234,9 @@ function Monitorear-Clientes {
     Read-Host "Enter para continuar..."
 }
 
-# ────────────────────────────────────────────────────────────
-# PRÁCTICA 2 — DNS
-# ────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# PRACTICA 2 - DNS
+# ------------------------------------------------------------
 
 function Instalar-DNS {
     Clear-Host
@@ -324,7 +309,7 @@ function Eliminar-Dominio-DNS {
     Log-Aviso "Dominios disponibles:"
     foreach ($z in $zonas) { Write-Host "  - $($z.ZoneName)" -ForegroundColor White }
 
-    $dominio = Read-Host "`nNombre exacto del dominio a eliminar"
+    $dominio = Read-Host "Nombre exacto del dominio a eliminar"
     if ($dominio -eq "") { return }
 
     if (Get-DnsServerZone -Name $dominio -ErrorAction SilentlyContinue) {
@@ -373,9 +358,41 @@ function Verificar-Estado-Servicios {
     Read-Host "Enter para continuar..."
 }
 
-# ────────────────────────────────────────────────────────────
-# PRÁCTICA 3 — SSH
-# ────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# PRACTICA 3 - SSH
+# ------------------------------------------------------------
+
+function SSH-Verificar-Instalacion {
+    Write-Host ""
+    Log-Aviso "=== Verificando SSH Server en Windows ==="
+
+    $capability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
+    if ($capability -and $capability.State -eq 'Installed') {
+        Log-Exito "OpenSSH Server esta instalado."
+    } else {
+        Log-Error "OpenSSH Server NO esta instalado."
+    }
+
+    $svc = Get-Service -Name sshd -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -eq "Running") {
+        Log-Exito "Servicio sshd esta corriendo."
+    } else {
+        Log-Warn "Servicio sshd esta INACTIVO."
+    }
+
+    if (Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue) {
+        Log-Exito "Firewall permite SSH (puerto 22)."
+    } else {
+        Log-Warn "Firewall NO tiene SSH permitido."
+    }
+
+    Write-Host ""
+    Log-Aviso "IP de esta maquina:"
+    Get-NetIPAddress -AddressFamily IPv4 |
+        Where-Object { $_.IPAddress -ne "127.0.0.1" -and $_.PrefixOrigin -ne "WellKnown" } |
+        Select-Object -ExpandProperty IPAddress |
+        ForEach-Object { Write-Host "  $_" -ForegroundColor White }
+}
 
 function SSH-Instalar-Configurar {
     Write-Host ""
@@ -416,37 +433,6 @@ function SSH-Instalar-Configurar {
         Where-Object { $_.IPAddress -ne "127.0.0.1" -and $_.PrefixOrigin -ne "WellKnown" } |
         Select-Object -First 1 -ExpandProperty IPAddress)
     Log-Exito "SSH listo. Conectate con: ssh $env:USERNAME@$ip"
-}
-
-function SSH-Verificar-Instalacion {
-    Write-Host ""
-    Log-Aviso "=== Verificando SSH Server en Windows ==="
-
-    $capability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
-    if ($capability -and $capability.State -eq 'Installed') {
-        Log-Exito "OpenSSH Server esta instalado."
-    } else {
-        Log-Error "OpenSSH Server NO esta instalado."
-    }
-
-    $svc = Get-Service -Name sshd -ErrorAction SilentlyContinue
-    if ($svc -and $svc.Status -eq "Running") {
-        Log-Exito "Servicio sshd esta corriendo."
-    } else {
-        Log-Warn "Servicio sshd esta INACTIVO."
-    }
-
-    if (Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue) {
-        Log-Exito "Firewall permite SSH (puerto 22)."
-    } else {
-        Log-Warn "Firewall NO tiene SSH permitido."
-    }
-
-    Write-Host ""
-    Log-Aviso "IP de esta maquina:"
-    Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.IPAddress -ne "127.0.0.1" -and $_.PrefixOrigin -ne "WellKnown" } |
-        Select-Object -ExpandProperty IPAddress | ForEach-Object { Write-Host "  $_" -ForegroundColor White }
 }
 
 function SSH-Conectarse {
