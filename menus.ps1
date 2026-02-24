@@ -1,18 +1,20 @@
 # ============================================================
-# menus.ps1 — Todos los menús de prácticas
+# menus.ps1 - Todos los menus de practicas
 # No ejecutar directamente, es llamado por menu_principal.ps1
 # ============================================================
 
 . "$PSScriptRoot\functions.ps1"
 
-# ────────────────────────────────────────────────────────────
-# PRÁCTICA 1 — DIAGNÓSTICO DEL SISTEMA
-# ────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# PRACTICA 1 - DIAGNOSTICO DEL SISTEMA
+# ------------------------------------------------------------
 
 function Menu-P1-Diagnostico {
     while ($true) {
         Clear-Host
-        
+        Write-Host "============================================" -ForegroundColor Cyan
+        Write-Host "   PRACTICA 1 - DIAGNOSTICO DEL SISTEMA    " -ForegroundColor Cyan
+        Write-Host "============================================" -ForegroundColor Cyan
         Write-Host ""
         Write-Host "  1) Mostrar informacion del sistema"
         Write-Host "  2) Volver al Menu Principal"
@@ -26,14 +28,16 @@ function Menu-P1-Diagnostico {
     }
 }
 
-# ────────────────────────────────────────────────────────────
-# PRÁCTICA 2 — DHCP + DNS
-# ────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# PRACTICA 2 - DHCP + DNS
+# ------------------------------------------------------------
 
 function _Submenu-DHCP {
     while ($true) {
         Clear-Host
-      
+        Write-Host "============================================" -ForegroundColor Cyan
+        Write-Host "        PRACTICA 2 - DHCP                  " -ForegroundColor Cyan
+        Write-Host "============================================" -ForegroundColor Cyan
         Write-Host ""
         Write-Host "  1) Instalar DHCP"
         Write-Host "  2) Configurar Scope"
@@ -63,7 +67,9 @@ function _Submenu-DHCP {
 function _Submenu-DNS {
     while ($true) {
         Clear-Host
-      
+        Write-Host "============================================" -ForegroundColor Cyan
+        Write-Host "        PRACTICA 2 - DNS                   " -ForegroundColor Cyan
+        Write-Host "============================================" -ForegroundColor Cyan
         Write-Host ""
         Write-Host "  1) Instalar DNS"
         Write-Host "  2) Agregar Dominio"
@@ -95,7 +101,9 @@ function _Submenu-DNS {
 function Menu-P2-DHCP-DNS {
     while ($true) {
         Clear-Host
-        
+        Write-Host "============================================" -ForegroundColor Cyan
+        Write-Host "     PRACTICA 2 - DHCP + DNS               " -ForegroundColor Cyan
+        Write-Host "============================================" -ForegroundColor Cyan
         Write-Host ""
         Write-Host "  1) DHCP"
         Write-Host "  2) DNS"
@@ -113,14 +121,16 @@ function Menu-P2-DHCP-DNS {
     }
 }
 
-# ────────────────────────────────────────────────────────────
-# PRÁCTICA 3 — SSH MANAGER
-# ────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# PRACTICA 3 - SSH MANAGER
+# ------------------------------------------------------------
 
 function Menu-P3-SSH {
     while ($true) {
         Clear-Host
-       
+        Write-Host "============================================" -ForegroundColor Cyan
+        Write-Host "        PRACTICA 3 - SSH MANAGER           " -ForegroundColor Cyan
+        Write-Host "============================================" -ForegroundColor Cyan
         Write-Host ""
         Write-Host "  1) Verificar instalacion SSH local"
         Write-Host "  2) Instalar y configurar SSH local"
