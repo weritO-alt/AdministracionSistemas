@@ -85,39 +85,17 @@ function Setup_Entorno_Windows {
     Set-ItemProperty "IIS:\Sites\ServidorFTP" `
         -Name ftpServer.userIsolation.mode -Value "IsolateDirectory"
 
-    # ---- ACCESO ANÓNIMO ----
-    # Habilitar autenticación anónima en el sitio
-    Set-WebConfigurationProperty -Filter "system.ftpServer/security/authentication/anonymousAuthentication" `
-        -PSPath "IIS:\Sites\ServidorFTP" -Name enabled -Value $true
+    # ---- DESBLOQUEAR Y CONFIGURAR SECCIONES FTP VIA APPCMD ----
+    $appcmd = "$env:windir\system32\inetsrv\appcmd.exe"
+    & $appcmd unlock config -section:system.ftpServer/security/authentication/anonymousAuthentication | Out-Null
+    & $appcmd unlock config -section:system.ftpServer/security/authentication/basicAuthentication     | Out-Null
+    & $appcmd unlock config -section:system.ftpServer/security/authorization                          | Out-Null
 
-    # Mapear usuario anónimo a 'ftp_anonymous'
-    Set-WebConfigurationProperty -Filter "system.ftpServer/security/authentication/anonymousAuthentication" `
-        -PSPath "IIS:\Sites\ServidorFTP" -Name userName -Value "ftp_anonymous"
-
-    # Habilitar autenticación básica (usuarios locales)
-    Set-WebConfigurationProperty -Filter "system.ftpServer/security/authentication/basicAuthentication" `
-        -PSPath "IIS:\Sites\ServidorFTP" -Name enabled -Value $true
-
-    # ---- REGLAS DE AUTORIZACIÓN FTP ----
-    # Limpiar reglas existentes y crear desde cero
-    Clear-WebConfiguration -Filter "system.ftpServer/security/authorization" `
-        -PSPath "IIS:\Sites\ServidorFTP" -ErrorAction SilentlyContinue
-
-    # Regla 1: Anónimo → solo lectura en /general
-    Add-WebConfiguration -Filter "system.ftpServer/security/authorization" `
-        -PSPath "IIS:\Sites\ServidorFTP\Public\general" -Value @{
-            accessType  = "Allow"
-            users       = "?"           # '?' = usuarios anónimos
-            permissions = "Read"
-        }
-
-    # Regla 2: Usuarios autenticados → lectura y escritura global
-    Add-WebConfiguration -Filter "system.ftpServer/security/authorization" `
-        -PSPath "IIS:\Sites\ServidorFTP" -Value @{
-            accessType  = "Allow"
-            users       = "*"           # '*' = todos los usuarios autenticados
-            permissions = "Read,Write"
-        }
+    & $appcmd set config "ServidorFTP" -section:system.ftpServer/security/authentication/anonymousAuthentication /enabled:true /userName:ftp_anonymous /commit:apphost | Out-Null
+    & $appcmd set config "ServidorFTP" -section:system.ftpServer/security/authentication/basicAuthentication /enabled:true /commit:apphost | Out-Null
+    & $appcmd clear config "ServidorFTP" -section:system.ftpServer/security/authorization /commit:apphost | Out-Null
+    & $appcmd set config "ServidorFTP" -section:system.ftpServer/security/authorization /+"[accessType='Allow',users='?',permissions='Read']" /commit:apphost | Out-Null
+    & $appcmd set config "ServidorFTP" -section:system.ftpServer/security/authorization /+"[accessType='Allow',users='*',permissions='Read,Write']" /commit:apphost | Out-Null
 
     # ---- PERMISOS NTFS CARPETA /general PÚBLICA ----
     # ftp_anonymous: solo lectura
