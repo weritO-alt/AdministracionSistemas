@@ -508,10 +508,38 @@ levantar_servicio() {
     read -p "  Ingresa el puerto en el que corre $nombre: " puerto
     [[ ! "$puerto" =~ ^[0-9]+$ ]] && { echo "  Puerto invalido." >&2; return; }
     echo ""
-    echo "  Levantando $nombre en puerto $puerto..."
+    echo "  Actualizando configuracion de $nombre al puerto $puerto..."
+    case "$servicio" in
+        httpd)
+            sed -i "s/^Listen .*/Listen $puerto/" /etc/httpd/conf/httpd.conf
+            sed -i "s/VirtualHost \*:[0-9]*/VirtualHost *:$puerto/" /etc/httpd/conf.d/vhost.conf 2>/dev/null
+            if command -v semanage &>/dev/null; then
+                semanage port -a -t http_port_t -p tcp "$puerto" 2>/dev/null ||                 semanage port -m -t http_port_t -p tcp "$puerto" 2>/dev/null
+            fi
+            ;;
+        nginx)
+            local vhost_file
+            vhost_file=$(ls /etc/nginx/conf.d/vhost_*.conf 2>/dev/null | head -1)
+            if [ -n "$vhost_file" ]; then
+                sed -i "s/listen [0-9]*/listen $puerto/" "$vhost_file"
+                mv "$vhost_file" "/etc/nginx/conf.d/vhost_$puerto.conf" 2>/dev/null
+            fi
+            if command -v semanage &>/dev/null; then
+                semanage port -a -t http_port_t -p tcp "$puerto" 2>/dev/null ||                 semanage port -m -t http_port_t -p tcp "$puerto" 2>/dev/null
+            fi
+            ;;
+        tomcat)
+            sed -i "s/port="[0-9]*"/port="$puerto"/" /etc/tomcat/server.xml 2>/dev/null
+            if command -v semanage &>/dev/null; then
+                semanage port -a -t http_port_t -p tcp "$puerto" 2>/dev/null ||                 semanage port -m -t http_port_t -p tcp "$puerto" 2>/dev/null
+            fi
+            ;;
+    esac
+    firewall-cmd --permanent --add-port="$puerto"/tcp > /dev/null 2>&1
+    firewall-cmd --reload > /dev/null 2>&1
     systemctl enable "$servicio" --now 2>/dev/null
     if systemctl restart "$servicio"; then
-        echo "  [OK] $nombre levantado correctamente."
+        echo "  [OK] $nombre levantado correctamente en puerto $puerto."
         echo "  Accede en: http://$(hostname -I | awk '{print $1}'):$puerto"
         verificar_servicio "$servicio" "$puerto"
     else
