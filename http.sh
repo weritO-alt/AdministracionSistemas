@@ -152,9 +152,11 @@ ServerSignature Off
 </IfModule>
 
 # Bloquear metodos HTTP peligrosos
-<LimitExcept GET POST HEAD>
-    Require all denied
-</LimitExcept>
+<Directory "/">
+    <LimitExcept GET POST HEAD>
+        Require all denied
+    </LimitExcept>
+</Directory>
 EOF
     echo "  Security Headers configurados en Apache."
 }
@@ -428,6 +430,7 @@ menu_principal() {
     echo "  |  5) Desinstalar servidor especifico      |"
     echo "  |  6) Cambiar version de servidor          |"
     echo "  |  7) Limpiar entorno (purgar todo)        |"
+    echo "  |  8) Levantar/Reiniciar servicio          |"
     echo "  |  0) Salir                                |"
     echo "  +-----------------------------------------+"; echo ""
 }
@@ -435,7 +438,7 @@ leer_opcion() {
     local opcion
     while true; do
         read -p "  Opcion: " opcion
-        [[ "$opcion" =~ ^[0-7]$ ]] && { echo "$opcion"; return; }
+        [[ "$opcion" =~ ^[0-8]$ ]] && { echo "$opcion"; return; }
         echo "  Error: Opcion invalida. Ingresa un numero del 0 al 7." >&2
     done
 }
@@ -477,6 +480,44 @@ flujo_instalacion() {
         nginx)  instalar_nginx  "$version" "$puerto"; verificar_servicio "nginx"  "$puerto" ;;
         tomcat) instalar_tomcat "$version" "$puerto"; verificar_servicio "tomcat" "$puerto" ;;
     esac
+}
+levantar_servicio() {
+    echo ""; echo "  ============================================"
+    echo "    Levantar / Reiniciar servicio"
+    echo "  ============================================"
+    local instalados=()
+    rpm -q httpd  > /dev/null 2>&1 && instalados+=("1) Apache (httpd)")
+    rpm -q nginx  > /dev/null 2>&1 && instalados+=("2) Nginx")
+    rpm -q tomcat > /dev/null 2>&1 && instalados+=("3) Tomcat")
+    if [ ${#instalados[@]} -eq 0 ]; then
+        echo "  No hay ningun servidor instalado."; return
+    fi
+    echo "  Servicios instalados:"; echo ""
+    for s in "${instalados[@]}"; do echo "    $s"; done
+    echo ""
+    local svc_op
+    read -p "  Selecciona el servicio (1-3): " svc_op
+    local servicio nombre
+    case "$svc_op" in
+        1) servicio="httpd";  nombre="Apache (httpd)" ;;
+        2) servicio="nginx";  nombre="Nginx" ;;
+        3) servicio="tomcat"; nombre="Tomcat" ;;
+        *) echo "  Opcion invalida." >&2; return ;;
+    esac
+    local puerto
+    read -p "  Ingresa el puerto en el que corre $nombre: " puerto
+    [[ ! "$puerto" =~ ^[0-9]+$ ]] && { echo "  Puerto invalido." >&2; return; }
+    echo ""
+    echo "  Levantando $nombre en puerto $puerto..."
+    systemctl enable "$servicio" --now 2>/dev/null
+    if systemctl restart "$servicio"; then
+        echo "  [OK] $nombre levantado correctamente."
+        echo "  Accede en: http://$(hostname -I | awk '{print $1}'):$puerto"
+        verificar_servicio "$servicio" "$puerto"
+    else
+        echo "  [!!] Error al levantar $nombre."
+        echo "       Revisa: journalctl -xe -u $servicio"
+    fi
 }
 flujo_verificacion() {
     echo ""; echo "  ============================================"
@@ -525,6 +566,7 @@ main() {
                 read -p "  Seguro que deseas purgar todos los servidores? [s/N]: " conf
                 [[ "$conf" =~ ^[sS]$ ]] && liberar_entorno
                 ;;
+            8) levantar_servicio ;;
             0)
                 echo ""; echo "  Saliendo. Hasta luego!"; echo ""; exit 0 ;;
         esac
