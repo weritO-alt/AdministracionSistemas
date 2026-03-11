@@ -290,7 +290,17 @@ EOF
 instalar_tomcat() {
     local version=$1 puerto=$2
     echo ""; echo "  Instalando Tomcat en puerto $puerto..."
-    if ! dnf install -y tomcat tomcat-webapps java-17-openjdk-headless; then
+    # Detectar paquete java disponible
+    local java_pkg
+    if dnf list available java-21-openjdk-headless &>/dev/null 2>&1; then
+        java_pkg="java-21-openjdk-headless"
+    elif dnf list available java-17-openjdk-headless &>/dev/null 2>&1; then
+        java_pkg="java-17-openjdk-headless"
+    else
+        java_pkg=$(dnf repoquery "java-*-openjdk-headless" --available --queryformat "%{name}" 2>/dev/null | sort -V | tail -1)
+    fi
+    echo "  Usando Java: ${java_pkg:-java-openjdk}"
+    if ! dnf install -y tomcat tomcat-webapps ${java_pkg:-java-latest-openjdk-headless}; then
         echo "  Error: No se pudo instalar Tomcat." >&2; return 1
     fi
     if ! rpm -q tomcat > /dev/null 2>&1; then
