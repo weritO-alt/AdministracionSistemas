@@ -1,7 +1,9 @@
 #!/bin/bash
 instalar_dependencias_base() {
     echo "Instalando dependencias base..."
-    dnf install -y -q curl net-tools firewalld psmisc iproute 2>/dev/null
+    if ! dnf install -y curl net-tools firewalld psmisc iproute; then
+        echo "  Advertencia: Algunas dependencias base no se instalaron correctamente." >&2
+    fi
     systemctl enable firewalld --now 2>/dev/null
 }
 liberar_entorno() {
@@ -15,7 +17,7 @@ liberar_entorno() {
         [ -n "$pids" ] && kill -9 $pids 2>/dev/null
     done
     echo "Eliminando paquetes..."
-    dnf remove -y httpd* nginx* tomcat* 2>/dev/null
+    dnf remove -y httpd\* nginx\* tomcat\* 2>/dev/null
     dnf autoremove -y 2>/dev/null
     rm -rf /var/www/html/* /var/www/httpd_* /var/www/nginx_* 2>/dev/null
     rm -rf /usr/share/tomcat/webapps/ROOT/* 2>/dev/null
@@ -161,15 +163,10 @@ aplicar_security_headers_nginx() {
     mkdir -p /etc/nginx/conf.d
     cat <<'EOF' > /etc/nginx/conf.d/security-headers.conf
 server_tokens off;
-
 add_header X-Frame-Options "SAMEORIGIN" always;
 add_header X-Content-Type-Options "nosniff" always;
 add_header X-XSS-Protection "1; mode=block" always;
 add_header Referrer-Policy "no-referrer-when-downgrade" always;
-
-if ($request_method !~ ^(GET|POST|HEAD)$) {
-    return 405;
-}
 EOF
     echo "  Security Headers configurados en Nginx."
 }
@@ -194,13 +191,16 @@ aplicar_security_headers_tomcat() {
 instalar_apache() {
     local version=$1 puerto=$2
     echo ""; echo "  Instalando Apache (httpd) en puerto $puerto..."
-    dnf install -y httpd mod_headers 2>/dev/null
-    if ! rpm -q httpd > /dev/null 2>&1; then
+    if ! dnf install -y httpd mod_headers; then
         echo "  Error: No se pudo instalar httpd." >&2; return 1
+    fi
+    if ! rpm -q httpd > /dev/null 2>&1; then
+        echo "  Error: httpd no quedo instalado correctamente." >&2; return 1
     fi
     local vhost_dir="/var/www/httpd_$puerto"
     mkdir -p "$vhost_dir"
-    sed -i "s/^Listen 80/Listen $puerto/" /etc/httpd/conf/httpd.conf
+    # Limpiar configuracion previa de puerto en httpd.conf
+    sed -i "s/^Listen .*/Listen $puerto/" /etc/httpd/conf/httpd.conf
     sed -i "s/^Listen 443/#Listen 443/" /etc/httpd/conf/httpd.conf 2>/dev/null
     cat <<EOF > /etc/httpd/conf.d/vhost.conf
 <VirtualHost *:$puerto>
@@ -219,7 +219,9 @@ EOF
     fi
     configurar_firewall "$puerto"
     systemctl enable httpd --now
-    systemctl restart httpd
+    if ! systemctl restart httpd; then
+        echo "  Error al iniciar httpd. Revisa: journalctl -xe -u httpd" >&2; return 1
+    fi
     echo ""; echo "  [OK] Apache (httpd) instalado y asegurado."
     echo "       Ruta web : $vhost_dir"
     echo "       Verificar: curl -I http://localhost:$puerto"
@@ -227,29 +229,45 @@ EOF
 instalar_nginx() {
     local version=$1 puerto=$2
     echo ""; echo "  Instalando Nginx en puerto $puerto..."
-    dnf install -y nginx 2>/dev/null
-    if ! rpm -q nginx > /dev/null 2>&1; then
+    if ! dnf install -y nginx; then
         echo "  Error: No se pudo instalar nginx." >&2; return 1
+    fi
+    if ! rpm -q nginx > /dev/null 2>&1; then
+        echo "  Error: nginx no quedo instalado correctamente." >&2; return 1
     fi
     local vhost_dir="/var/www/nginx_$puerto"
     mkdir -p "$vhost_dir"
     mkdir -p /etc/nginx/conf.d
+
+    # Deshabilitar el server block por defecto en nginx.conf
+    sed -i '/^\s*server\s*{/,/^\s*}/{ s/^/#DISABLED# / }' /etc/nginx/nginx.conf 2>/dev/null
+
+    # Aplicar headers de seguridad en archivo separado (sin bloques server{})
     aplicar_security_headers_nginx
-    cat <<EOF > /etc/nginx/conf.d/default.conf
+
+    # Crear vhost con includes del archivo de headers
+    cat <<EOF > /etc/nginx/conf.d/vhost_$puerto.conf
 server {
     listen $puerto;
     root $vhost_dir;
     index index.html;
     server_name _;
 
-    include /etc/nginx/conf.d/security-headers.conf;
+    server_tokens off;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+
+    if (\$request_method !~ ^(GET|POST|HEAD)$) {
+        return 405;
+    }
 
     location / {
         try_files \$uri \$uri/ =404;
     }
 }
 EOF
-    sed -i 's/^server {/#server {/' /etc/nginx/nginx.conf 2>/dev/null
     crear_index "$vhost_dir" "Nginx" "$version" "$puerto"
     crear_usuario_dedicado "nginx" "$vhost_dir"
     if command -v semanage &>/dev/null; then
@@ -258,7 +276,11 @@ EOF
     fi
     configurar_firewall "$puerto"
     systemctl enable nginx --now
-    systemctl restart nginx
+    if ! systemctl restart nginx; then
+        echo "  Error al iniciar nginx. Revisa: journalctl -xe -u nginx" >&2
+        nginx -t 2>&1
+        return 1
+    fi
     echo ""; echo "  [OK] Nginx instalado y asegurado."
     echo "       Ruta web : $vhost_dir"
     echo "       Verificar: curl -I http://localhost:$puerto"
@@ -266,9 +288,11 @@ EOF
 instalar_tomcat() {
     local version=$1 puerto=$2
     echo ""; echo "  Instalando Tomcat en puerto $puerto..."
-    dnf install -y tomcat tomcat-webapps java-17-openjdk-headless 2>/dev/null
-    if ! rpm -q tomcat > /dev/null 2>&1; then
+    if ! dnf install -y tomcat tomcat-webapps java-17-openjdk-headless; then
         echo "  Error: No se pudo instalar Tomcat." >&2; return 1
+    fi
+    if ! rpm -q tomcat > /dev/null 2>&1; then
+        echo "  Error: tomcat no quedo instalado correctamente." >&2; return 1
     fi
     sed -i "s/port=\"8080\"/port=\"$puerto\"/g" /etc/tomcat/server.xml
     aplicar_security_headers_tomcat
@@ -281,7 +305,9 @@ instalar_tomcat() {
     fi
     configurar_firewall "$puerto"
     systemctl enable tomcat --now
-    systemctl restart tomcat
+    if ! systemctl restart tomcat; then
+        echo "  Error al iniciar tomcat. Revisa: journalctl -xe -u tomcat" >&2; return 1
+    fi
     echo ""; echo "  [OK] Tomcat instalado y asegurado."
     echo "       Verificar: curl -I http://localhost:$puerto"
 }
@@ -331,7 +357,7 @@ desinstalar_servidor() {
     systemctl stop "$servicio" 2>/dev/null
     pkill -f "$pkg" 2>/dev/null
     echo "  Desinstalando $pkg..."
-    dnf remove -y "$pkg"* 2>/dev/null
+    dnf remove -y "$pkg"\* 2>/dev/null
     dnf autoremove -y 2>/dev/null
     rm -rf /var/www/"${pkg}"_* /var/www/httpd_* 2>/dev/null
     echo "  [OK] $pkg desinstalado correctamente."
@@ -370,7 +396,7 @@ cambiar_version() {
     [[ ! "$conf" =~ ^[sS]$ ]] && { echo "  Cancelado."; return; }
     echo "  Desinstalando version anterior..."
     systemctl stop "$servicio" 2>/dev/null
-    dnf remove -y "$pkg"* 2>/dev/null
+    dnf remove -y "$pkg"\* 2>/dev/null
     dnf autoremove -y 2>/dev/null
     rm -rf /var/www/"${pkg}"_* /var/www/httpd_* 2>/dev/null
     echo "  Instalando nueva version..."
