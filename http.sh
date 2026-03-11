@@ -191,7 +191,7 @@ aplicar_security_headers_tomcat() {
 instalar_apache() {
     local version=$1 puerto=$2
     echo ""; echo "  Instalando Apache (httpd) en puerto $puerto..."
-    if ! dnf install -y httpd mod_headers; then
+    if ! dnf install -y httpd; then
         echo "  Error: No se pudo instalar httpd." >&2; return 1
     fi
     if ! rpm -q httpd > /dev/null 2>&1; then
