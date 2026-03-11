@@ -117,67 +117,12 @@ crear_index() {
     cat <<HTMLEOF > "$ruta/index.html"
 <!DOCTYPE html>
 <html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>$servicio</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #f5f5f5;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .card {
-      background: #ffffff;
-      border-radius: 12px;
-      padding: 48px 56px;
-      box-shadow: 0 2px 16px rgba(0,0,0,0.08);
-      max-width: 480px;
-      width: 90%;
-      text-align: center;
-    }
-    .badge {
-      display: inline-block;
-      background: #f0f0f0;
-      color: #555;
-      font-size: 12px;
-      font-weight: 600;
-      letter-spacing: 1.5px;
-      text-transform: uppercase;
-      padding: 4px 12px;
-      border-radius: 20px;
-      margin-bottom: 20px;
-    }
-    h1 { font-size: 28px; font-weight: 700; color: #111; margin-bottom: 6px; }
-    .version { font-size: 13px; color: #999; margin-bottom: 32px; }
-    .divider { border: none; border-top: 1px solid #eee; margin: 24px 0; }
-    .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; text-align: left; }
-    .info-item label {
-      display: block; font-size: 11px; font-weight: 600;
-      letter-spacing: 1px; text-transform: uppercase; color: #aaa; margin-bottom: 4px;
-    }
-    .info-item span { font-size: 15px; font-weight: 600; color: #222; }
-    .status { display: inline-flex; align-items: center; gap: 6px; margin-top: 28px; font-size: 13px; color: #666; }
-    .dot { width: 8px; height: 8px; background: #22c55e; border-radius: 50%; animation: pulse 2s infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-  </style>
-</head>
+<head><meta charset="UTF-8"><title>$servicio</title></head>
 <body>
-  <div class="card">
-    <div class="badge">Servidor Web</div>
-    <h1>$servicio</h1>
-    <p class="version">$version</p>
-    <hr class="divider">
-    <div class="info-grid">
-      <div class="info-item"><label>Puerto</label><span>$puerto</span></div>
-      <div class="info-item"><label>IP</label><span>$ip</span></div>
-    </div>
-    <div class="status"><span class="dot"></span>Servicio activo y funcionando</div>
-  </div>
+  <h2>$servicio</h2>
+  <p>Version: $version</p>
+  <p>IP: $ip</p>
+  <p>Puerto: $puerto</p>
 </body>
 </html>
 HTMLEOF
