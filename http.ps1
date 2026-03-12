@@ -57,11 +57,12 @@ function Mostrar-Menu {
     Write-Host "  +-----------------------------------------+" -ForegroundColor Yellow
     Write-Host "  |  1) Instalar IIS                         |" -ForegroundColor Yellow
     Write-Host "  |  2) Instalar Apache (httpd)              |" -ForegroundColor Yellow
-    Write-Host "  |  3) Instalar Tomcat                      |" -ForegroundColor Yellow
-    Write-Host "  |  4) Verificar servicio activo            |" -ForegroundColor Yellow
-    Write-Host "  |  5) Desinstalar servidor especifico      |" -ForegroundColor Yellow
-    Write-Host "  |  6) Levantar/Reiniciar servicio          |" -ForegroundColor Yellow
-    Write-Host "  |  7) Limpiar entorno (purgar todo)        |" -ForegroundColor Yellow
+    Write-Host "  |  3) Instalar Nginx                       |" -ForegroundColor Yellow
+    Write-Host "  |  4) Instalar Tomcat                      |" -ForegroundColor Yellow
+    Write-Host "  |  5) Verificar servicio activo            |" -ForegroundColor Yellow
+    Write-Host "  |  6) Desinstalar servidor especifico      |" -ForegroundColor Yellow
+    Write-Host "  |  7) Levantar/Reiniciar servicio          |" -ForegroundColor Yellow
+    Write-Host "  |  8) Limpiar entorno (purgar todo)        |" -ForegroundColor Yellow
     Write-Host "  |  0) Salir                                |" -ForegroundColor Yellow
     Write-Host "  +-----------------------------------------+" -ForegroundColor Yellow
     Write-Host ""
@@ -325,6 +326,92 @@ Header always unset X-Powered-By
     Verificar-Servicio -servicio "Apache$puerto" -puerto $puerto
 }
 
+
+# ============================================================
+# INSTALAR NGINX
+# ============================================================
+
+function Instalar-Nginx {
+    param($puerto)
+    Write-Host ""
+    Write-Host "  Instalando Nginx en puerto $puerto..." -ForegroundColor Cyan
+
+    $nginxDir = "C:\nginx"
+
+    if (-not (Test-Path "$nginxDir\nginx.exe")) {
+        Write-Host "  Descargando Nginx para Windows..." -ForegroundColor Gray
+        $url = "https://nginx.org/download/nginx-1.26.2.zip"
+        $zipPath = "$env:TEMP\nginx.zip"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+            Write-Host "  Extrayendo Nginx..." -ForegroundColor Gray
+            Expand-Archive -Path $zipPath -DestinationPath "C:\" -Force
+            $extracted = Get-ChildItem "C:\" -Filter "nginx-*" -Directory | Select-Object -First 1
+            if ($extracted) { Rename-Item $extracted.FullName $nginxDir -Force }
+            Remove-Item $zipPath -Force
+        } catch {
+            Write-Host "  Error descargando Nginx." -ForegroundColor Red
+            Write-Host "  Descarga manual: https://nginx.org/en/download.html" -ForegroundColor Yellow
+            return
+        }
+    }
+
+    # Directorio web
+    $webRoot = "$nginxDir\html_$puerto"
+    New-Item -ItemType Directory -Path $webRoot -Force | Out-Null
+
+    # Configurar nginx.conf
+    $confContent = @"
+worker_processes  1;
+events { worker_connections  1024; }
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    server_tokens off;
+    sendfile        on;
+    keepalive_timeout  65;
+    server {
+        listen       $puerto;
+        server_name  localhost;
+        root         $($webRoot -replace '\\', '/');
+        index        index.html;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy "no-referrer-when-downgrade" always;
+        location / {
+            try_files \$uri \$uri/ =404;
+        }
+    }
+}
+"@
+    Set-Content -Path "$nginxDir\conf\nginx.conf" -Value $confContent -Encoding UTF8
+
+    Crear-Index -ruta $webRoot -servicio "Nginx" -version "1.26.2" -puerto $puerto
+
+    Configurar-Firewall -puerto $puerto -nombre "Nginx"
+
+    # Instalar como servicio con NSSM si esta disponible, sino correr directo
+    $nssm = Get-Command nssm -ErrorAction SilentlyContinue
+    if ($nssm) {
+        & nssm install "Nginx" "$nginxDir\nginx.exe" 2>&1 | Out-Null
+        Start-Service "Nginx" -ErrorAction SilentlyContinue
+    } else {
+        # Detener instancia previa si existe
+        Get-Process nginx -ErrorAction SilentlyContinue | Stop-Process -Force
+        Start-Process -FilePath "$nginxDir\nginx.exe" -WorkingDirectory $nginxDir -WindowStyle Hidden
+    }
+
+    $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike "*Loopback*" } | Select-Object -First 1).IPAddress
+    Write-Host ""
+    Write-Host "  [OK] Nginx instalado y corriendo." -ForegroundColor Green
+    Write-Host "       Ruta web : $webRoot" -ForegroundColor Gray
+    Write-Host "       Accede en: http://$ip`:$puerto" -ForegroundColor Green
+
+    Start-Sleep -Seconds 3
+    Verificar-Servicio -servicio "nginx" -puerto $puerto
+}
+
 # ============================================================
 # INSTALAR TOMCAT
 # ============================================================
@@ -415,7 +502,7 @@ function Desinstalar-Servidor {
     Write-Host "  ============================================" -ForegroundColor Cyan
     Write-Host "    Desinstalar servidor especifico" -ForegroundColor Cyan
     Write-Host "  ============================================" -ForegroundColor Cyan
-    Write-Host "  1) IIS   2) Apache (httpd)   3) Tomcat"
+    Write-Host "  1) IIS   2) Apache (httpd)   3) Nginx   4) Tomcat"
     Write-Host ""
     $op = Read-Host "  Selecciona el servidor (1-3)"
 
@@ -437,6 +524,12 @@ function Desinstalar-Servidor {
             Write-Host "  [OK] Apache desinstalado." -ForegroundColor Green
         }
         "3" {
+            Write-Host "  Desinstalando Nginx..." -ForegroundColor Yellow
+            Get-Process nginx -ErrorAction SilentlyContinue | Stop-Process -Force
+            Remove-Item "C:\nginx" -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "  [OK] Nginx desinstalado." -ForegroundColor Green
+        }
+        "4" {
             Write-Host "  Desinstalando Tomcat..." -ForegroundColor Yellow
             Get-Service | Where-Object { $_.Name -like "Tomcat*" } | ForEach-Object {
                 Stop-Service $_.Name -ErrorAction SilentlyContinue
@@ -568,6 +661,10 @@ function Limpiar-Entorno {
     }
     Remove-Item "C:\Apache24" -Recurse -Force -ErrorAction SilentlyContinue
 
+    # Detener y eliminar Nginx
+    Get-Process nginx -ErrorAction SilentlyContinue | Stop-Process -Force
+    Remove-Item "C:\nginx" -Recurse -Force -ErrorAction SilentlyContinue
+
     # Detener y desinstalar Tomcat
     Get-Service | Where-Object { $_.Name -like "Tomcat*" } | ForEach-Object {
         Stop-Service $_.Name -ErrorAction SilentlyContinue
@@ -598,6 +695,7 @@ function Flujo-Instalacion {
     switch ($tipo) {
         "iis"    { Instalar-IIS    -puerto $puerto }
         "apache" { Instalar-Apache -puerto $puerto }
+        "nginx"  { Instalar-Nginx  -puerto $puerto }
         "tomcat" { Instalar-Tomcat -puerto $puerto }
     }
 }
@@ -615,11 +713,12 @@ while ($true) {
     switch ($opcion) {
         "1" { Flujo-Instalacion -tipo "iis"    -nombre "IIS" }
         "2" { Flujo-Instalacion -tipo "apache" -nombre "Apache (httpd)" }
-        "3" { Flujo-Instalacion -tipo "tomcat" -nombre "Tomcat" }
-        "4" { Flujo-Verificacion }
-        "5" { Desinstalar-Servidor }
-        "6" { Levantar-Servicio }
-        "7" {
+        "3" { Flujo-Instalacion -tipo "nginx"  -nombre "Nginx" }
+        "4" { Flujo-Instalacion -tipo "tomcat" -nombre "Tomcat" }
+        "5" { Flujo-Verificacion }
+        "6" { Desinstalar-Servidor }
+        "7" { Levantar-Servicio }
+        "8" {
             $conf = Read-Host "  Seguro que deseas purgar todos los servidores? [s/N]"
             if ($conf -match '^[sS]$') { Limpiar-Entorno }
         }
