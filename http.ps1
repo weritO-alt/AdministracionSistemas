@@ -249,20 +249,21 @@ function Instalar-Apache {
     $apacheExe = "$apacheDir\bin\httpd.exe"
 
     if (-not (Test-Path $apacheExe)) {
-        Write-Host "  Descargando Apache para Windows..." -ForegroundColor Gray
+        # Instalar Chocolatey si no esta disponible
+        if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Write-Host "  Instalando Chocolatey..." -ForegroundColor Gray
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine")
+        }
 
-        # Descargar desde apachelounge
-        $url = "https://www.apachelounge.com/download/VS17/binaries/httpd-2.4.62-240904-win64-VS17.zip"
-        $zipPath = "$env:TEMP\apache.zip"
-
+        Write-Host "  Instalando Apache con Chocolatey..." -ForegroundColor Gray
         try {
-            Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
-            Write-Host "  Extrayendo Apache..." -ForegroundColor Gray
-            Expand-Archive -Path $zipPath -DestinationPath "C:\" -Force
-            Remove-Item $zipPath -Force
+            & choco install apache-httpd -y --no-progress 2>&1 | Out-Null
+            $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine")
         } catch {
-            Write-Host "  Error descargando Apache. Verifica conexion a internet." -ForegroundColor Red
-            Write-Host "  Descarga manual: https://www.apachelounge.com/download/" -ForegroundColor Yellow
+            Write-Host "  Error instalando Apache." -ForegroundColor Red
             return
         }
     }
