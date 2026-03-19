@@ -3,6 +3,8 @@
 #   Sistema: Windows Server 2019
 #   Servicios: Apache httpd, Nginx, Tomcat, FileZilla Server
 #
+#   FTP: IIS FTP local (127.0.0.1) — equivalente a vsftpd en Fedora
+#
 #   Ejecutar como Administrador:
 #   powershell -ExecutionPolicy Bypass -File practica7_windows.ps1
 # =============================================================
@@ -11,11 +13,13 @@
 
 # -------------------------------------------------------------
 # VARIABLES GLOBALES
+# FTP propio de Windows Server (IIS FTP en localhost)
+# equivalente a vsftpd en Fedora
 # -------------------------------------------------------------
-$FTP_SERVER   = "192.168.114.129"
+$FTP_SERVER   = "127.0.0.1"
 $FTP_USER     = "repositorio"
 $FTP_PASS     = "Hola1234."
-$FTP_BASE     = "repositorio/Windows"
+$FTP_BASE     = "Windows"
 
 $RESUMEN_INSTALACIONES = @()
 $SERVICIOS_VERIFICAR   = @()   # "nombre|servicio_windows|puerto|proto"
@@ -790,29 +794,114 @@ function Mostrar-Resumen {
 }
 
 # -------------------------------------------------------------
-# PREPARAR REPOSITORIO FTP LOCAL (para Windows)
+# PREPARAR REPOSITORIO IIS FTP LOCAL (equivalente a vsftpd en Fedora)
 # -------------------------------------------------------------
 function Preparar-Repositorio-FTP {
-    $base = "C:\inetpub\ftproot\repositorio\Windows"
+    $base = "C:\inetpub\ftproot\Windows"
     Write-Host ""
     Write-Host "=========================================================="
-    Write-Host "         PREPARANDO REPOSITORIO FTP LOCAL (WINDOWS)      "
+    Write-Host "         PREPARANDO REPOSITORIO IIS FTP LOCAL            "
     Write-Host "=========================================================="
+    Write-Host "Equivalente a vsftpd en Fedora, usando IIS FTP de Windows"
     Write-Host "Ruta base: $base"
 
+    # 1. Instalar IIS con FTP
+    Write-Host ""
+    Write-Host "Instalando IIS FTP (puede tardar unos minutos)..."
+    Install-WindowsFeature Web-Server, Web-Ftp-Server -IncludeManagementTools | Out-Null
+    Write-Host "OK IIS FTP instalado."
+
+    # 2. Crear estructura de carpetas
     foreach ($svc in @("Apache","Nginx","Tomcat","FileZilla")) {
         New-Item -ItemType Directory -Force -Path "$base\$svc" | Out-Null
     }
 
+    # 3. Crear usuario repositorio local
+    $existe = Get-LocalUser -Name $FTP_USER -ErrorAction SilentlyContinue
+    if (-not $existe) {
+        $pwd_sec = ConvertTo-SecureString $FTP_PASS -AsPlainText -Force
+        New-LocalUser -Name $FTP_USER -Password $pwd_sec `
+            -FullName "Repositorio FTP" -PasswordNeverExpires | Out-Null
+        Write-Host "OK Usuario '$FTP_USER' creado."
+    } else {
+        Write-Host "OK Usuario '$FTP_USER' ya existe."
+    }
+
+    # 4. Crear sitio FTP en IIS
+    Import-Module WebAdministration -ErrorAction SilentlyContinue
+    $sitio = Get-WebSite -Name "FTP-Repositorio" -ErrorAction SilentlyContinue
+    if (-not $sitio) {
+        New-WebFtpSite -Name "FTP-Repositorio" -Port 21 -PhysicalPath $base | Out-Null
+        Write-Host "OK Sitio FTP creado en IIS."
+    } else {
+        Write-Host "OK Sitio FTP ya existe en IIS."
+    }
+
+    # Autenticacion y autorizacion
+    Set-WebConfigurationProperty `
+        -Filter "/system.ftpServer/security/authentication/basicAuthentication" `
+        -Name enabled -Value $true `
+        -PSPath "IIS:\Sites\FTP-Repositorio" -ErrorAction SilentlyContinue
+    Add-WebConfiguration "/system.ftpServer/security/authorization" `
+        -Value @{accessType="Allow"; users=$FTP_USER; permissions="Read"} `
+        -PSPath "IIS:\Sites\FTP-Repositorio" -ErrorAction SilentlyContinue
+
+    # Permisos NTFS
+    $acl  = Get-Acl $base
+    $regla = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $FTP_USER,"ReadAndExecute","ContainerInherit,ObjectInherit","None","Allow")
+    $acl.SetAccessRule($regla)
+    Set-Acl $base $acl
+    Write-Host "OK Permisos configurados para '$FTP_USER'."
+
+    # Abrir puerto 21
+    Abrir-Puerto-Firewall 21 "IIS-FTP"
+    Start-WebSite -Name "FTP-Repositorio" -ErrorAction SilentlyContinue
+
+    # 5. Descargar instaladores
     Write-Host ""
-    Write-Host "Descarga los instaladores manualmente y colocalos en:"
-    Write-Host "  $base\Apache\   -> httpd-x.x.x-win64.zip"
-    Write-Host "  $base\Nginx\    -> nginx-x.x.x.zip"
-    Write-Host "  $base\Tomcat\   -> apache-tomcat-x.x.x-windows-x64.zip"
-    Write-Host "  $base\FileZilla\ -> FileZilla_Server_x.x.x_win64-setup.exe"
+    Write-Host "Descargando instaladores de Windows..."
+    $wc = New-Object System.Net.WebClient
+
+    Write-Host "  -> Nginx..."
+    $wc.DownloadFile(
+        "https://nginx.org/download/nginx-1.26.2.zip",
+        "$base\Nginx\nginx-1.26.2.zip")
+
+    Write-Host "  -> Apache..."
+    $wc.DownloadFile(
+        "https://www.apachelounge.com/download/VS17/binaries/httpd-2.4.62-240904-win64-VS17.zip",
+        "$base\Apache\httpd-2.4.62-win64.zip")
+
+    Write-Host "  -> Tomcat..."
+    $wc.DownloadFile(
+        "https://dlcdn.apache.org/tomcat/tomcat-10/v10.1.30/bin/apache-tomcat-10.1.30-windows-x64.zip",
+        "$base\Tomcat\tomcat-10.1.30-win64.zip")
+
+    Write-Host "  -> FileZilla Server..."
+    $wc.DownloadFile(
+        "https://dl2.cdn.filezilla-project.org/server/FileZilla_Server_1.8.2_win64-setup.exe",
+        "$base\FileZilla\FileZilla_Server_1.8.2_win64-setup.exe")
+
+    # 6. Generar SHA256
     Write-Host ""
-    Write-Host "Luego genera los SHA256 con:"
-    Write-Host '  Get-FileHash .\archivo.zip -Algorithm SHA256 | Select-Object -ExpandProperty Hash > archivo.zip.sha256'
+    Write-Host "Generando archivos SHA256..."
+    Get-ChildItem $base -Recurse -File |
+        Where-Object { $_.Extension -ne ".sha256" } |
+        ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            Set-Content -Path "$($_.FullName).sha256" -Value $hash
+            Write-Host "  OK $($_.Name).sha256"
+        }
+
+    Write-Host ""
+    Write-Host "OK Repositorio IIS FTP listo en $base"
+    Write-Host "   Usuario : $FTP_USER  |  Password: $FTP_PASS  |  Puerto: 21"
+    Write-Host ""
+    Write-Host "-- Archivos disponibles ---------------------------------"
+    Get-ChildItem $base -Recurse -File |
+        Where-Object { $_.Extension -ne ".sha256" } |
+        ForEach-Object { Write-Host "  $($_.Name)" }
     Write-Host "=========================================================="
 }
 
