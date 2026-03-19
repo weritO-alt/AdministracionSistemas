@@ -1,6 +1,16 @@
 #!/bin/bash
 
-
+# =============================================================
+#   PRÁCTICA 7 - Orquestador de Instalación con SSL/TLS
+#   Sistema: Fedora Server
+#   Servicios: httpd (Apache), Nginx, Tomcat, vsftpd
+#   Correcciones aplicadas:
+#     - verificar_resumen() llama verificar_http() por cada servicio
+#     - HSTS (Strict-Transport-Security) en Apache y Nginx
+#     - Tomcat: web.xml con security-constraint para redirect real
+#     - Hash: soporta SHA256 y MD5 como fallback
+#     - Array SERVICIOS_VERIFICAR para rastrear puertos y protocolos
+# =============================================================
 
 FTP_SERVER="192.168.56.130"
 FTP_USER="anonymous"
@@ -32,6 +42,7 @@ main() {
         echo " 4) vsftpd (FTP)"
         echo " 5) Ver Resumen de Instalaciones"
         echo " 6) Preparar repositorio FTP local"
+        echo " 7) Cambiar puertos de un servicio"
         echo " 0) Salir"
         echo "=========================================================="
         read -p "Selecciona una opción: " opcion < /dev/tty
@@ -40,6 +51,7 @@ main() {
             0) echo "Saliendo..."; break ;;
             5) verificar_resumen; continue ;;
             6) preparar_repositorio_ftp; continue ;;
+            7) cambiar_puertos; continue ;;
             1|2|3|4) ;;
             *) echo "Opción inválida."; continue ;;
         esac
@@ -824,7 +836,210 @@ verificar_resumen() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# PREPARAR REPOSITORIO FTP LOCAL
+# CAMBIAR PUERTOS DE UN SERVICIO YA INSTALADO
+# ─────────────────────────────────────────────────────────────
+cambiar_puertos() {
+    echo ""
+    echo "=========================================================="
+    echo "         CAMBIAR PUERTOS DE SERVICIO                     "
+    echo "=========================================================="
+    echo " 1) Apache (httpd)"
+    echo " 2) Nginx"
+    echo " 3) Tomcat"
+    echo " 0) Regresar"
+    echo "=========================================================="
+    read -p "Selecciona el servicio: " srv < /dev/tty
+    [[ "$srv" == "0" ]] && return
+
+    read puerto_http puerto_https <<< $(pedir_puerto "servicio" 80 443)
+
+    case "$srv" in
+        1) cambiar_puertos_apache "$puerto_http" "$puerto_https" ;;
+        2) cambiar_puertos_nginx  "$puerto_http" "$puerto_https" ;;
+        3) cambiar_puertos_tomcat "$puerto_http" "$puerto_https" ;;
+        *) echo "Opción inválida." ;;
+    esac
+}
+
+cambiar_puertos_apache() {
+    local http=$1 https=$2
+    local conf="/etc/httpd/conf.d/reprobados_apache.conf"
+
+    if [[ ! -f "$conf" ]]; then
+        echo "Apache no está configurado. Instálalo primero." > /dev/tty
+        return 1
+    fi
+
+    local dir="/etc/ssl/apache"
+    # Detectar si SSL está activo
+    local ssl="N"
+    grep -q "SSLEngine" "$conf" && ssl="S"
+
+    echo "Actualizando configuración de Apache..." > /dev/tty
+    rm -f "$conf"
+
+    # Comentar Listen del httpd.conf principal
+    sed -i 's/^Listen 80$/#Listen 80/' /etc/httpd/conf/httpd.conf 2>/dev/null
+    sed -i 's/^Listen 443$/#Listen 443/' /etc/httpd/conf/httpd.conf 2>/dev/null
+
+    if [[ "$ssl" == "S" ]]; then
+        cat > "$conf" <<EOF
+Listen $http
+Listen $https
+
+<VirtualHost *:$http>
+    ServerName www.reprobados.com
+    Redirect permanent / https://www.reprobados.com:$https/
+</VirtualHost>
+
+<VirtualHost *:$https>
+    ServerName www.reprobados.com
+    DocumentRoot /var/www/apache
+    SSLEngine on
+    SSLCertificateFile    $dir/server.crt
+    SSLCertificateKeyFile $dir/server.key
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+</VirtualHost>
+EOF
+    else
+        cat > "$conf" <<EOF
+Listen $http
+
+<VirtualHost *:$http>
+    ServerName www.reprobados.com
+    DocumentRoot /var/www/apache
+</VirtualHost>
+EOF
+    fi
+
+    abrir_puerto_firewall "$http"
+    abrir_puerto_firewall "$https"
+    recargar_firewall
+    systemctl restart httpd
+    echo "✔ Apache ahora escucha en HTTP:$http  HTTPS:$https" > /dev/tty
+}
+
+cambiar_puertos_nginx() {
+    local http=$1 https=$2
+    local conf="/etc/nginx/conf.d/reprobados_nginx.conf"
+
+    if [[ ! -f "$conf" ]]; then
+        echo "Nginx no está configurado. Instálalo primero." > /dev/tty
+        return 1
+    fi
+
+    local dir="/etc/ssl/nginx"
+    local ssl="N"
+    grep -q "ssl_certificate" "$conf" && ssl="S"
+
+    echo "Actualizando configuración de Nginx..." > /dev/tty
+    rm -f "$conf"
+
+    semanage port -a -t http_port_t -p tcp "$http" > /dev/null 2>&1
+    semanage port -a -t http_port_t -p tcp "$https" > /dev/null 2>&1
+
+    if [[ "$ssl" == "S" ]]; then
+        cat > "$conf" <<EOF
+server {
+    listen $http;
+    server_name www.reprobados.com;
+    return 301 https://\$host:$https\$request_uri;
+}
+
+server {
+    listen $https ssl;
+    server_name www.reprobados.com;
+    ssl_certificate     $dir/server.crt;
+    ssl_certificate_key $dir/server.key;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    root  /var/www/nginx;
+    index index.html;
+}
+EOF
+    else
+        cat > "$conf" <<EOF
+server {
+    listen $http;
+    server_name www.reprobados.com;
+    root  /var/www/nginx;
+    index index.html;
+}
+EOF
+    fi
+
+    abrir_puerto_firewall "$http"
+    abrir_puerto_firewall "$https"
+    recargar_firewall
+    systemctl restart nginx
+    echo "✔ Nginx ahora escucha en HTTP:$http  HTTPS:$https" > /dev/tty
+}
+
+cambiar_puertos_tomcat() {
+    local http=$1 https=$2
+    local server_xml="/etc/tomcat/server.xml"
+
+    if [[ ! -f "$server_xml" ]]; then
+        echo "Tomcat no está configurado. Instálalo primero." > /dev/tty
+        return 1
+    fi
+
+    local ssl="N"
+    grep -q "SSLEnabled" "$server_xml" && ssl="S"
+    local ks="/etc/ssl/tomcat/keystore.p12"
+
+    echo "Actualizando configuración de Tomcat..." > /dev/tty
+
+    semanage port -a -t http_port_t -p tcp "$http" > /dev/null 2>&1
+    semanage port -a -t http_port_t -p tcp "$https" > /dev/null 2>&1
+
+    if [[ "$ssl" == "S" ]]; then
+        cat > "$server_xml" <<EOF
+<Server port="8005" shutdown="SHUTDOWN">
+  <Service name="Catalina">
+    <Connector port="$http" protocol="HTTP/1.1"
+               connectionTimeout="20000"
+               redirectPort="$https" />
+    <Connector port="$https"
+               protocol="org.apache.coyote.http11.Http11NioProtocol"
+               maxThreads="150" SSLEnabled="true">
+      <SSLHostConfig>
+        <Certificate certificateKeystoreFile="$ks"
+                     type="RSA"
+                     certificateKeystorePassword="reprobados" />
+      </SSLHostConfig>
+    </Connector>
+    <Engine name="Catalina" defaultHost="localhost">
+      <Host name="localhost" appBase="webapps"
+            unpackWARs="true" autoDeploy="true" />
+    </Engine>
+  </Service>
+</Server>
+EOF
+    else
+        cat > "$server_xml" <<EOF
+<Server port="8005" shutdown="SHUTDOWN">
+  <Service name="Catalina">
+    <Connector port="$http" protocol="HTTP/1.1"
+               connectionTimeout="20000" />
+    <Engine name="Catalina" defaultHost="localhost">
+      <Host name="localhost" appBase="webapps"
+            unpackWARs="true" autoDeploy="true" />
+    </Engine>
+  </Service>
+</Server>
+EOF
+    fi
+
+    abrir_puerto_firewall "$http"
+    abrir_puerto_firewall "$https"
+    recargar_firewall
+    systemctl restart tomcat
+    echo "Esperando que Tomcat levante..." > /dev/tty
+    sleep 8
+    echo "✔ Tomcat ahora escucha en HTTP:$http  HTTPS:$https" > /dev/tty
+}
+
+
 # Descarga los RPMs con dnf download y genera sus SHA256
 # para que puedan instalarse desde el FTP local
 # ─────────────────────────────────────────────────────────────
