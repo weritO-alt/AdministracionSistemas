@@ -85,111 +85,88 @@ EOF
 # ============================================================
 
 # Descarga un binario y su .sha256 desde el FTP privado y valida integridad
-descargar_y_validar_hash() {
-    local servicio=$1
-    local archivo=$2
-    local ruta="ftp://$FTP_SERVER/http/Linux/$servicio/"
-    cd /tmp || exit 1
-    echo "Descargando $archivo desde el FTP..."
-    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}"
-    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.sha256"
+# Ruta base del repositorio FTP local
+FTP_LOCAL_PATH="/srv/ftp/http/Linux"
 
-    if [[ ! -f "${archivo}.sha256" ]]; then
+validar_hash_local() {
+    local ruta_archivo=$1
+    local ruta_sha256="${ruta_archivo}.sha256"
+
+    if [[ ! -f "$ruta_sha256" ]]; then
         echo "Advertencia: No se encontró archivo .sha256. Saltando validación."
         return 0
     fi
 
     local hash_remoto
-    hash_remoto=$(awk '{print $1}' "${archivo}.sha256")
+    hash_remoto=$(awk '{print $1}' "$ruta_sha256")
     local hash_local
-    hash_local=$(sha256sum "$archivo" | awk '{print $1}')
+    hash_local=$(sha256sum "$ruta_archivo" | awk '{print $1}')
 
     if [[ "$hash_remoto" != "$hash_local" ]]; then
         echo "ERROR DE INTEGRIDAD: El hash SHA256 no coincide. Abortando." >&2
         return 1
     fi
     echo "Validación SHA256 exitosa."
+    return 0
 }
 
 # Navegación interactiva por el FTP para elegir servicio y versión
 navegar_y_descargar_ftp() {
-    local ftp_user="linux"
-    local ftp_pass="1234"
-    local ip_servidor="192.168.114.129"
-    local base_path="/http/Linux"
-    local url_base="ftps://$ip_servidor$base_path/"
-    local dir_descargas="/tmp/descargas_ftp"
-
-    mkdir -p "$dir_descargas"
-
     echo "--------------------------------------------------"
-    echo " Conectando al FTP -> $base_path"
-    echo " Listando carpetas de servicios disponibles..."
+    echo " Repositorio local: $FTP_LOCAL_PATH"
+    echo " Listando servicios disponibles..."
     echo "--------------------------------------------------"
 
-    mapfile -t carpetas_servicios < <(
-        curl -s -l --insecure -u "$ftp_user:$ftp_pass" "$url_base"
-    )
+    # Listar carpetas de servicios
+    mapfile -t carpetas_servicios < <(find "$FTP_LOCAL_PATH" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" | sort)
 
     if [[ ${#carpetas_servicios[@]} -eq 0 ]]; then
-        echo "Error: No se encontraron carpetas en el repositorio." >&2
+        echo "Error: No se encontraron carpetas en $FTP_LOCAL_PATH" >&2
         return 1
     fi
 
     for i in "${!carpetas_servicios[@]}"; do
-        echo "$((i+1))) $(echo "${carpetas_servicios[$i]}" | tr -d '\r')"
+        echo "$((i+1))) ${carpetas_servicios[$i]}"
     done
 
-    read -r -p "Selecciona el número de la carpeta: " sel_serv
-    local servicio_elegido
-    servicio_elegido=$(echo "${carpetas_servicios[$((sel_serv-1))]}" | tr -d '\r')
-    local url_versiones="${url_base}${servicio_elegido}/"
+    read -r -p "Selecciona el número del servicio: " sel_serv
+    local servicio_elegido="${carpetas_servicios[$((sel_serv-1))]}"
+    local ruta_servicio="$FTP_LOCAL_PATH/$servicio_elegido"
 
     echo "--------------------------------------------------"
-    echo " Entrando a /$servicio_elegido"
-    echo " Listando archivos binarios disponibles..."
+    echo " Entrando a $ruta_servicio"
+    echo " Listando versiones disponibles..."
     echo "--------------------------------------------------"
 
-    mapfile -t archivos_versiones < <(
-        curl -s -l --insecure -u "$ftp_user:$ftp_pass" "$url_versiones" \
-        | grep -v '\.sha256$' | grep -v '\.md5$'
-    )
+    # Listar archivos binarios (excluir .sha256 y .md5)
+    mapfile -t archivos_versiones < <(find "$ruta_servicio" -maxdepth 1 -type f         ! -name "*.sha256" ! -name "*.md5" | xargs -I{} basename {} | sort)
 
     if [[ ${#archivos_versiones[@]} -eq 0 ]]; then
-        echo "No se encontraron archivos binarios." >&2
+        echo "No se encontraron archivos en $ruta_servicio" >&2
         return 1
     fi
 
     for i in "${!archivos_versiones[@]}"; do
-        echo "$((i+1))) $(echo "${archivos_versiones[$i]}" | tr -d '\r')"
+        echo "$((i+1))) ${archivos_versiones[$i]}"
     done
 
-    read -r -p "Selecciona la versión a descargar: " sel_ver
-    local archivo_elegido
-    archivo_elegido=$(echo "${archivos_versiones[$((sel_ver-1))]}" | tr -d '\r')
+    read -r -p "Selecciona la versión a instalar: " sel_ver
+    local archivo_elegido="${archivos_versiones[$((sel_ver-1))]}"
+    local ruta_completa="$ruta_servicio/$archivo_elegido"
 
-    echo "Descargando y validando $archivo_elegido ..."
-    curl -s --show-error --insecure \
-        -u "$ftp_user:$ftp_pass" \
-        "$url_versiones$archivo_elegido" \
-        -o "$dir_descargas/$archivo_elegido"
+    echo "--------------------------------------------------"
+    echo " Validando integridad de $archivo_elegido ..."
+    echo "--------------------------------------------------"
 
-    curl -s --show-error --insecure \
-        -u "$ftp_user:$ftp_pass" \
-        "$url_versiones$archivo_elegido.sha256" \
-        -o "$dir_descargas/$archivo_elegido.sha256"
-
-    cd "$dir_descargas" || return 1
-    if sha256sum -c "$archivo_elegido.sha256" > /dev/null 2>&1; then
-        echo "Validación SHA256 exitosa."
-        PAQUETE_DESCARGADO="$dir_descargas/$archivo_elegido"
-        cd - > /dev/null || return 1
-        return 0
-    else
-        echo "Error: El archivo está corrupto o incompleto." >&2
-        cd - > /dev/null || return 1
+    validar_hash_local "$ruta_completa"
+    if [[ $? -ne 0 ]]; then
+        echo "Error: Fallo en la validación SHA256." >&2
         return 1
     fi
+
+    PAQUETE_DESCARGADO="$ruta_completa"
+    echo "Archivo listo: $PAQUETE_DESCARGADO"
+    return 0
 }
 
 # ============================================================
@@ -202,7 +179,12 @@ instalar_apache() {
     local ssl=$3
 
     liberar_puertos_web
-    [[ "$web_ftp" == "FTP" ]] && descargar_y_validar_hash "Apache" "$archivo"
+    if [[ "$web_ftp" == "FTP" && -n "$archivo" ]]; then
+        echo "Instalando desde repositorio local: $archivo"
+        validar_hash_local "$archivo"
+        [[ $? -ne 0 ]] && return 1
+        sudo dnf install -y "$archivo" > /dev/null
+    fi
 
     echo "Instalando httpd (Apache) en Fedora..."
     sudo dnf install -y httpd > /dev/null
@@ -258,7 +240,12 @@ instalar_nginx() {
     local ssl=$3
 
     liberar_puertos_web
-    [[ "$web_ftp" == "FTP" ]] && descargar_y_validar_hash "Nginx" "$archivo"
+    if [[ "$web_ftp" == "FTP" && -n "$archivo" ]]; then
+        echo "Instalando desde repositorio local: $archivo"
+        validar_hash_local "$archivo"
+        [[ $? -ne 0 ]] && return 1
+        sudo dnf install -y "$archivo" > /dev/null
+    fi
 
     echo "Instalando Nginx en Fedora..."
     sudo dnf install -y nginx > /dev/null
@@ -312,7 +299,12 @@ instalar_tomcat() {
     local p_https=${5:-443}
 
     liberar_puertos_web
-    [[ "$web_ftp" == "FTP" ]] && descargar_y_validar_hash "Tomcat" "$archivo"
+    if [[ "$web_ftp" == "FTP" && -n "$archivo" ]]; then
+        echo "Instalando desde repositorio local: $archivo"
+        validar_hash_local "$archivo"
+        [[ $? -ne 0 ]] && return 1
+        sudo dnf install -y "$archivo" > /dev/null
+    fi
 
     echo "Instalando Tomcat y Java en Fedora..."
     sudo dnf install -y java-17-openjdk tomcat > /dev/null
@@ -398,7 +390,12 @@ instalar_vsftpd() {
     local ssl=$3
 
     echo "Instalando vsftpd en Fedora..."
-    [[ "$web_ftp" == "FTP" ]] && descargar_y_validar_hash "vsftpd" "$archivo"
+    if [[ "$web_ftp" == "FTP" && -n "$archivo" ]]; then
+        echo "Instalando desde repositorio local: $archivo"
+        validar_hash_local "$archivo"
+        [[ $? -ne 0 ]] && return 1
+        sudo dnf install -y "$archivo" > /dev/null
+    fi
     sudo dnf install -y vsftpd openssl > /dev/null
 
     # Asegurar shell válida para usuarios locales
