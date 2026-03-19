@@ -1,9 +1,21 @@
 #!/bin/bash
 
+# =============================================================
+#   PRÁCTICA 7 - Orquestador de Instalación con SSL/TLS
+#   Sistema: Fedora Server
+#   Servicios: httpd (Apache), Nginx, Tomcat, vsftpd
+#   Correcciones aplicadas:
+#     - verificar_resumen() llama verificar_http() por cada servicio
+#     - HSTS (Strict-Transport-Security) en Apache y Nginx
+#     - Tomcat: web.xml con security-constraint para redirect real
+#     - Hash: soporta SHA256 y MD5 como fallback
+#     - Array SERVICIOS_VERIFICAR para rastrear puertos y protocolos
+# =============================================================
 
-FTP_SERVER="192.168.56.104"
-FTP_USER="chofis"
-FTP_PASS="3006"
+FTP_SERVER="192.168.56.130"
+FTP_USER="anonymous"
+FTP_PASS=""
+FTP_BASE="anon/http/Linux"
 RESUMEN_INSTALACIONES=()
 
 # Formato de cada entrada: "nombre|systemd_unit|puerto|proto"
@@ -29,6 +41,7 @@ main() {
         echo " 3) Tomcat"
         echo " 4) vsftpd (FTP)"
         echo " 5) Ver Resumen de Instalaciones"
+        echo " 6) Preparar repositorio FTP local"
         echo " 0) Salir"
         echo "=========================================================="
         read -p "Selecciona una opción: " opcion < /dev/tty
@@ -36,6 +49,7 @@ main() {
         case "$opcion" in
             0) echo "Saliendo..."; break ;;
             5) verificar_resumen; continue ;;
+            6) preparar_repositorio_ftp; continue ;;
             1|2|3|4) ;;
             *) echo "Opción inválida."; continue ;;
         esac
@@ -123,10 +137,10 @@ pedir_puerto() {
 listar_versiones_ftp() {
     local servicio=$1
     echo "" > /dev/tty
-    echo "Buscando instaladores de $servicio en /http/Linux/$servicio/ ..." > /dev/tty
+    echo "Buscando instaladores de $servicio en /$FTP_BASE/$servicio/ ..." > /dev/tty
 
     mapfile -t versiones < <(curl -s -l -u "$FTP_USER:$FTP_PASS" \
-        "ftp://$FTP_SERVER/http/Linux/$servicio/" 2>/dev/null \
+        "ftp://$FTP_SERVER/$FTP_BASE/$servicio/" 2>/dev/null \
         | grep -v '\.sha256$' | grep -v '\.md5$')
 
     if [ ${#versiones[@]} -eq 0 ]; then
@@ -160,7 +174,7 @@ listar_versiones_ftp() {
 # ─────────────────────────────────────────────────────────────
 descargar_y_validar_hash() {
     local servicio=$1 archivo=$2
-    local ruta="ftp://$FTP_SERVER/http/Linux/$servicio/"
+    local ruta="ftp://$FTP_SERVER/$FTP_BASE/$servicio/"
 
     echo "Descargando $archivo desde FTP..." > /dev/tty
     cd /tmp || exit 1
@@ -480,6 +494,9 @@ EOF
     fi
 
     setsebool -P httpd_can_network_connect 1 > /dev/null 2>&1
+    # FIX: registrar puertos no estándar en SELinux para que Nginx pueda usarlos
+    semanage port -a -t http_port_t -p tcp "$puerto_http" > /dev/null 2>&1
+    semanage port -a -t http_port_t -p tcp "$puerto_https" > /dev/null 2>&1
     recargar_firewall
     systemctl enable --now nginx > /dev/null
     systemctl restart nginx
@@ -599,6 +616,9 @@ EOF
         SERVICIOS_VERIFICAR+=("Tomcat|tomcat|$puerto_http|http")
     fi
 
+    # FIX: registrar puertos no estándar en SELinux para Tomcat
+    semanage port -a -t http_port_t -p tcp "$puerto_http" > /dev/null 2>&1
+    semanage port -a -t http_port_t -p tcp "$puerto_https" > /dev/null 2>&1
     recargar_firewall
     systemctl enable --now tomcat > /dev/null
     systemctl restart tomcat
@@ -811,6 +831,70 @@ verificar_resumen() {
 
     echo "=========================================================="
     echo ""
+}
+
+# ─────────────────────────────────────────────────────────────
+# PREPARAR REPOSITORIO FTP LOCAL
+# Descarga los RPMs con dnf download y genera sus SHA256
+# para que puedan instalarse desde el FTP local
+# ─────────────────────────────────────────────────────────────
+preparar_repositorio_ftp() {
+    local base="/srv/ftp/anon/http/Linux"
+    echo "" > /dev/tty
+    echo "=========================================================="  > /dev/tty
+    echo "         PREPARANDO REPOSITORIO FTP LOCAL                "  > /dev/tty
+    echo "=========================================================="  > /dev/tty
+    echo "Ruta base: $base"                                            > /dev/tty
+
+    # Crear estructura de directorios
+    mkdir -p "$base/Apache"
+    mkdir -p "$base/Nginx"
+    mkdir -p "$base/Tomcat"
+    mkdir -p "$base/vsftpd"
+
+    # ── Descargar RPMs ────────────────────────────────────────
+    echo "" > /dev/tty
+    echo "Descargando RPMs con dnf download..." > /dev/tty
+
+    echo "  → Apache (httpd)..." > /dev/tty
+    dnf download httpd mod_ssl --destdir "$base/Apache/" > /dev/null 2>&1
+
+    echo "  → Nginx..." > /dev/tty
+    dnf download nginx --destdir "$base/Nginx/" > /dev/null 2>&1
+
+    echo "  → Tomcat + Java..." > /dev/tty
+    dnf download tomcat java-17-openjdk --destdir "$base/Tomcat/" > /dev/null 2>&1
+
+    echo "  → vsftpd..." > /dev/tty
+    dnf download vsftpd --destdir "$base/vsftpd/" > /dev/null 2>&1
+
+    # ── Generar SHA256 para cada RPM ──────────────────────────
+    echo "" > /dev/tty
+    echo "Generando archivos SHA256..." > /dev/tty
+    for servicio in Apache Nginx Tomcat vsftpd; do
+        for f in "$base/$servicio/"*.rpm; do
+            [[ -f "$f" ]] || continue
+            sha256sum "$f" | awk '{print $1}' > "${f}.sha256"
+            echo "  ✔ $(basename $f).sha256" > /dev/tty
+        done
+    done
+
+    # ── Permisos para acceso anónimo ─────────────────────────
+    chmod -R 755 /srv/ftp/anon/
+    chown -R nobody:nobody /srv/ftp/anon/ 2>/dev/null
+
+    echo "" > /dev/tty
+    echo "✔ Repositorio FTP listo en $base" > /dev/tty
+    echo "  Ahora puedes instalar los servicios usando la opción FTP" > /dev/tty
+    echo "  FTP_SERVER configurado: $FTP_SERVER" > /dev/tty
+    echo "" > /dev/tty
+
+    # Mostrar contenido generado
+    echo "── Archivos disponibles ─────────────────────────────────" > /dev/tty
+    find "$base" -name "*.rpm" | sort | while read f; do
+        echo "  $(basename $f)" > /dev/tty
+    done
+    echo "==========================================================" > /dev/tty
 }
 
 # ─────────────────────────────────────────────────────────────
