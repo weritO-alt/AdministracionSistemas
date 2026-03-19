@@ -1,9 +1,9 @@
 # =============================================================
 #   PRACTICA 7 - Orquestador de Instalacion con SSL/TLS
 #   Sistema: Windows Server 2019
-#   Servicios: Apache httpd, Nginx, Tomcat, FileZilla Server
+#   Servicios: IIS (FTP), Apache httpd, Nginx
 #
-#   FTP: IIS FTP local (127.0.0.1) — equivalente a vsftpd en Fedora
+#   FTP: Servidor FTP de Fedora (192.168.114.129)
 #
 #   Ejecutar como Administrador:
 #   powershell -ExecutionPolicy Bypass -File practica7_windows.ps1
@@ -13,10 +13,9 @@
 
 # -------------------------------------------------------------
 # VARIABLES GLOBALES
-# FTP propio de Windows Server (IIS FTP en localhost)
-# equivalente a vsftpd en Fedora
+# FTP: apunta al servidor vsftpd de Fedora
 # -------------------------------------------------------------
-$FTP_SERVER   = "127.0.0.1"
+$FTP_SERVER   = "192.168.114.129"
 $FTP_USER     = "repositorio"
 $FTP_PASS     = "Hola1234."
 $FTP_BASE     = "Windows"
@@ -28,8 +27,6 @@ $SERVICIOS_VERIFICAR   = @()   # "nombre|servicio_windows|puerto|proto"
 $BASE_DIR     = "C:\Servicios"
 $APACHE_DIR   = "$BASE_DIR\Apache"
 $NGINX_DIR    = "$BASE_DIR\Nginx"
-$TOMCAT_DIR   = "$BASE_DIR\Tomcat"
-$FZ_DIR       = "$BASE_DIR\FileZilla"
 $SSL_DIR      = "$BASE_DIR\SSL"
 
 # -------------------------------------------------------------
@@ -41,28 +38,33 @@ function Main {
         Write-Host "=========================================================="
         Write-Host "   PRACTICA 7 - ORQUESTADOR DE SERVICIOS (WINDOWS 2019)  "
         Write-Host "=========================================================="
-        Write-Host " 1) Apache (httpd)"
-        Write-Host " 2) Nginx"
-        Write-Host " 3) Tomcat"
-        Write-Host " 4) FileZilla Server (FTP)"
-        Write-Host " 5) Ver Resumen de Instalaciones"
-        Write-Host " 6) Preparar repositorio FTP local"
+        Write-Host " 1) IIS (servidor FTP)"
+        Write-Host " 2) Apache (httpd)"
+        Write-Host " 3) Nginx"
+        Write-Host " 4) Ver Resumen de Instalaciones"
+        Write-Host " 5) Preparar repositorio FTP en Fedora"
         Write-Host " 0) Salir"
         Write-Host "=========================================================="
         $opcion = Read-Host "Selecciona una opcion"
 
         switch ($opcion) {
             "0" { Mostrar-Resumen; Write-Host "Saliendo..."; return }
-            "5" { Mostrar-Resumen; continue }
-            "6" { Preparar-Repositorio-FTP; continue }
-            { $_ -in "1","2","3","4" } { }
+            "4" { Mostrar-Resumen; continue }
+            "5" { Preparar-Repositorio-FTP; continue }
+            { $_ -in "1","2","3" } { }
             default { Write-Host "Opcion invalida."; continue }
+        }
+
+        # IIS no necesita origen FTP ni SSL opcional igual
+        if ($opcion -eq "1") {
+            Instalar-IIS
+            continue
         }
 
         Write-Host ""
         Write-Host "De donde deseas instalar?"
         Write-Host " 1) WEB (descarga directa)"
-        Write-Host " 2) FTP (repositorio privado)"
+        Write-Host " 2) FTP (repositorio de Fedora)"
         Write-Host " 0) Regresar"
         $origen = Read-Host "Selecciona origen"
         if ($origen -eq "0") { continue }
@@ -74,10 +76,8 @@ function Main {
         $archivo = ""
         if ($web_ftp -eq "FTP") {
             $carpeta = switch ($opcion) {
-                "1" { "Apache" }
-                "2" { "Nginx"  }
-                "3" { "Tomcat" }
-                "4" { "FileZilla" }
+                "2" { "Apache" }
+                "3" { "Nginx"  }
             }
             $archivo = Listar-Versiones-FTP $carpeta
             if ($archivo -in "INVALIDO","REGRESAR") {
@@ -86,10 +86,8 @@ function Main {
         }
 
         switch ($opcion) {
-            "1" { Instalar-Apache  $archivo $web_ftp $ssl }
-            "2" { Instalar-Nginx   $archivo $web_ftp $ssl }
-            "3" { Instalar-Tomcat  $archivo $web_ftp $ssl }
-            "4" { Instalar-FileZilla $archivo $web_ftp $ssl }
+            "2" { Instalar-Apache $archivo $web_ftp $ssl }
+            "3" { Instalar-Nginx  $archivo $web_ftp $ssl }
         }
     }
 }
@@ -117,6 +115,80 @@ function Pedir-Puerto {
     }
 
     return @([int]$ph, [int]$ps)
+}
+
+# -------------------------------------------------------------
+# IIS - Servidor FTP (equivalente a vsftpd en Fedora)
+# -------------------------------------------------------------
+function Instalar-IIS {
+    Write-Host ""
+    Write-Host "Instalando IIS con FTP..."
+
+    # Instalar IIS y FTP
+    Install-WindowsFeature Web-Server, Web-Ftp-Server -IncludeManagementTools | Out-Null
+    Write-Host "OK IIS FTP instalado."
+
+    # Crear carpeta raiz del FTP
+    $ftp_root = "C:\inetpub\ftproot\Windows"
+    foreach ($svc in @("Apache","Nginx")) {
+        New-Item -ItemType Directory -Force -Path "$ftp_root\$svc" | Out-Null
+    }
+
+    # Crear usuario repositorio
+    $existe = Get-LocalUser -Name $FTP_USER -ErrorAction SilentlyContinue
+    if (-not $existe) {
+        $pwd_sec = ConvertTo-SecureString $FTP_PASS -AsPlainText -Force
+        New-LocalUser -Name $FTP_USER -Password $pwd_sec `
+            -FullName "Repositorio FTP" -PasswordNeverExpires | Out-Null
+        Write-Host "OK Usuario '$FTP_USER' creado."
+    } else {
+        Write-Host "OK Usuario '$FTP_USER' ya existe."
+    }
+
+    # Crear sitio FTP en IIS
+    Import-Module WebAdministration -ErrorAction SilentlyContinue
+    $sitio = Get-WebSite -Name "FTP-Repositorio" -ErrorAction SilentlyContinue
+    if (-not $sitio) {
+        New-WebFtpSite -Name "FTP-Repositorio" -Port 21 -PhysicalPath $ftp_root | Out-Null
+        Write-Host "OK Sitio FTP creado en IIS."
+    } else {
+        Write-Host "OK Sitio FTP ya existe."
+    }
+
+    # Autenticacion basica
+    Set-WebConfigurationProperty `
+        -Filter "/system.ftpServer/security/authentication/basicAuthentication" `
+        -Name enabled -Value $true `
+        -PSPath "IIS:\Sites\FTP-Repositorio" -ErrorAction SilentlyContinue
+
+    # Autorizacion lectura para usuario repositorio
+    Add-WebConfiguration "/system.ftpServer/security/authorization" `
+        -Value @{accessType="Allow"; users=$FTP_USER; permissions="Read"} `
+        -PSPath "IIS:\Sites\FTP-Repositorio" -ErrorAction SilentlyContinue
+
+    # Permisos NTFS
+    $acl   = Get-Acl $ftp_root
+    $regla = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $FTP_USER,"ReadAndExecute","ContainerInherit,ObjectInherit","None","Allow")
+    $acl.SetAccessRule($regla)
+    Set-Acl $ftp_root $acl
+    Write-Host "OK Permisos NTFS configurados."
+
+    # Abrir puerto 21 en firewall
+    Abrir-Puerto-Firewall 21 "IIS-FTP"
+
+    # Iniciar sitio
+    Start-WebSite -Name "FTP-Repositorio" -ErrorAction SilentlyContinue
+
+    $script:RESUMEN_INSTALACIONES += "IIS FTP | Puerto: 21 | Raiz: $ftp_root"
+    $script:SERVICIOS_VERIFICAR   += "IIS-FTP|FTPSVC|21|ftp"
+
+    Write-Host ""
+    Write-Host "OK IIS FTP listo."
+    Write-Host "   Usuario : $FTP_USER"
+    Write-Host "   Password: $FTP_PASS"
+    Write-Host "   Puerto  : 21"
+    Write-Host "   Raiz    : $ftp_root"
 }
 
 # -------------------------------------------------------------
