@@ -293,15 +293,14 @@ generar_ssl() {
 # ─────────────────────────────────────────────────────────────
 crear_index() {
     local servidor=$1 ssl_status=$2 puerto=$3 docroot=$4
-    local color="red" msg="SITIO NO SEGURO (HTTP)"
-    [[ "$ssl_status" == "S" ]] && color="green" && msg="SITIO SEGURO (HTTPS)"
+    local proto="HTTP"
+    [[ "$ssl_status" == "S" ]] && proto="HTTPS"
     mkdir -p "$docroot"
     cat > "$docroot/index.html" <<EOF
 <html>
-<body style='font-family: sans-serif; text-align: center; padding: 50px;'>
-    <h1 style='color: $color;'>Servicio activo: $servidor</h1>
-    <h2 style='background: $color; color: white; padding: 10px;'>$msg</h2>
-    <p>Dominio: www.reprobados.com</p>
+<body>
+    <p>Servidor: $servidor</p>
+    <p>Protocolo: $proto</p>
     <p>Puerto: $puerto</p>
 </body>
 </html>
@@ -914,6 +913,8 @@ EOF
 
     abrir_puerto_firewall "$http"
     abrir_puerto_firewall "$https"
+    semanage port -a -t http_port_t -p tcp "$http" > /dev/null 2>&1
+    semanage port -a -t http_port_t -p tcp "$https" > /dev/null 2>&1
     recargar_firewall
     systemctl restart httpd
     echo "✔ Apache ahora escucha en HTTP:$http  HTTPS:$https" > /dev/tty
