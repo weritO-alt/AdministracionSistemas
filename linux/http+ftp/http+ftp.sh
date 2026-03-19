@@ -139,9 +139,21 @@ listar_versiones_ftp() {
     echo "" > /dev/tty
     echo "Buscando instaladores de $servicio en /$FTP_BASE/$servicio/ ..." > /dev/tty
 
-    mapfile -t versiones < <(curl -s -l -u "$FTP_USER:$FTP_PASS" \
-        "ftp://$FTP_SERVER/$FTP_BASE/$servicio/" 2>/dev/null \
-        | grep -v '\.sha256$' | grep -v '\.md5$')
+    # FIX: intentar primero ftps:// (SSL implícito puerto 990),
+    #      si falla intentar ftp:// (puerto 21 sin SSL)
+    local url_base
+    mapfile -t versiones < <(
+        curl -s -l --insecure -u "$FTP_USER:$FTP_PASS" \
+            "ftps://$FTP_SERVER/$FTP_BASE/$servicio/" 2>/dev/null \
+        | grep -v '\.sha256$' | grep -v '\.md5$'
+    )
+    if [ ${#versiones[@]} -eq 0 ]; then
+        mapfile -t versiones < <(
+            curl -s -l -u "$FTP_USER:$FTP_PASS" \
+                "ftp://$FTP_SERVER/$FTP_BASE/$servicio/" 2>/dev/null \
+            | grep -v '\.sha256$' | grep -v '\.md5$'
+        )
+    fi
 
     if [ ${#versiones[@]} -eq 0 ]; then
         echo "No se encontraron versiones para $servicio." > /dev/tty
@@ -174,12 +186,17 @@ listar_versiones_ftp() {
 # ─────────────────────────────────────────────────────────────
 descargar_y_validar_hash() {
     local servicio=$1 archivo=$2
-    local ruta="ftp://$FTP_SERVER/$FTP_BASE/$servicio/"
+    local ruta_ftps="ftps://$FTP_SERVER/$FTP_BASE/$servicio/"
+    local ruta_ftp="ftp://$FTP_SERVER/$FTP_BASE/$servicio/"
 
     echo "Descargando $archivo desde FTP..." > /dev/tty
     cd /tmp || exit 1
 
-    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}"
+    # FIX: intentar ftps primero, luego ftp plano
+    curl -s --insecure -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftps}${archivo}" 2>/dev/null
+    if [[ ! -s "$archivo" ]]; then
+        curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftp}${archivo}" 2>/dev/null
+    fi
 
     if [[ ! -f "$archivo" ]]; then
         echo "ERROR: No se pudo descargar $archivo." > /dev/tty
@@ -187,7 +204,10 @@ descargar_y_validar_hash() {
     fi
 
     # ── Intentar SHA256 ───────────────────────────────────────
-    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.sha256" 2>/dev/null
+    curl -s --insecure -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftps}${archivo}.sha256" 2>/dev/null
+    if [[ ! -s "${archivo}.sha256" ]]; then
+        curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftp}${archivo}.sha256" 2>/dev/null
+    fi
 
     if [[ -s "${archivo}.sha256" ]]; then
         local hash_remoto hash_local
@@ -206,7 +226,10 @@ descargar_y_validar_hash() {
 
     # ── Fallback MD5 ──────────────────────────────────────────
     rm -f "${archivo}.sha256"
-    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.md5" 2>/dev/null
+    curl -s --insecure -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftps}${archivo}.md5" 2>/dev/null
+    if [[ ! -s "${archivo}.md5" ]]; then
+        curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftp}${archivo}.md5" 2>/dev/null
+    fi
 
     if [[ -s "${archivo}.md5" ]]; then
         local hash_remoto hash_local
@@ -864,6 +887,13 @@ preparar_repositorio_ftp() {
 
     echo "  → Tomcat + Java..." > /dev/tty
     dnf download tomcat java-17-openjdk --destdir "$base/Tomcat/" > /dev/null 2>&1
+    # Fedora 43 puede llamarlo tomcat o tomcat10, intentamos ambos
+    dnf download tomcat10 --destdir "$base/Tomcat/" > /dev/null 2>&1
+    # Si sigue vacío, copiamos el RPM ya instalado del caché de dnf
+    if [ -z "$(ls $base/Tomcat/*.rpm 2>/dev/null)" ]; then
+        find /var/cache/dnf -name "tomcat*.rpm" -exec cp {} "$base/Tomcat/" \; 2>/dev/null
+        find /var/cache/dnf -name "java-17*.rpm" -exec cp {} "$base/Tomcat/" \; 2>/dev/null
+    fi
 
     echo "  → vsftpd..." > /dev/tty
     dnf download vsftpd --destdir "$base/vsftpd/" > /dev/null 2>&1
