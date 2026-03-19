@@ -1,16 +1,5 @@
 #!/bin/bash
 
-# =============================================================
-#   PRÁCTICA 7 - Orquestador de Instalación con SSL/TLS
-#   Sistema: Fedora Server
-#   Servicios: httpd (Apache), Nginx, Tomcat, vsftpd
-#   Correcciones aplicadas:
-#     - verificar_resumen() llama verificar_http() por cada servicio
-#     - HSTS (Strict-Transport-Security) en Apache y Nginx
-#     - Tomcat: web.xml con security-constraint para redirect real
-#     - Hash: soporta SHA256 y MD5 como fallback
-#     - Array SERVICIOS_VERIFICAR para rastrear puertos y protocolos
-# =============================================================
 
 FTP_SERVER="192.168.56.104"
 FTP_USER="chofis"
@@ -345,7 +334,12 @@ instalar_apache() {
     chcon -R -t httpd_sys_content_t "$docroot" > /dev/null 2>&1
 
     rm -f "$conf_dir/reprobados_apache.conf"
-    [ -f "$conf_dir/ssl.conf" ] && mv "$conf_dir/ssl.conf" "$conf_dir/ssl.conf.bak" 2>/dev/null
+    # FIX: eliminar ssl.conf y cualquier .bak previo para evitar Listen duplicado
+    rm -f "$conf_dir/ssl.conf" "$conf_dir/ssl.conf.bak"
+    # FIX: comentar Listen 80 y Listen 443 del httpd.conf principal
+    #      para que solo nuestro conf los defina y no haya conflicto
+    sed -i 's/^Listen 80$/#Listen 80/' /etc/httpd/conf/httpd.conf 2>/dev/null
+    sed -i 's/^Listen 443$/#Listen 443/' /etc/httpd/conf/httpd.conf 2>/dev/null
 
     if [[ "$ssl" == "S" ]]; then
         local dir; dir=$(generar_ssl "apache")
