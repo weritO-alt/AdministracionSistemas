@@ -1,1122 +1,440 @@
 #!/bin/bash
 
-# =============================================================
-#   PRÁCTICA 7 - Orquestador de Instalación con SSL/TLS
-#   Sistema: Fedora Server
-#   Servicios: httpd (Apache), Nginx, Tomcat, vsftpd
-#   Correcciones aplicadas:
-#     - verificar_resumen() llama verificar_http() por cada servicio
-#     - HSTS (Strict-Transport-Security) en Apache y Nginx
-#     - Tomcat: web.xml con security-constraint para redirect real
-#     - Hash: soporta SHA256 y MD5 como fallback
-#     - Array SERVICIOS_VERIFICAR para rastrear puertos y protocolos
-# =============================================================
+# ============================================================
+#  Instalador de servicios web desde FTP
+#  Fedora  |  Apache · Nginx · Tomcat
+#  Flujo: FTP → descarga → valida SHA256 → instala → browser
+# ============================================================
 
-FTP_SERVER="192.168.56.130"
-FTP_USER="anonymous"
-FTP_PASS=""
-FTP_BASE="http/Linux"
-RESUMEN_INSTALACIONES=()
+FTP_IP="192.168.114.129"
+FTP_USER="chofis"
+FTP_PASS="3006"
+FTP_BASE="/http/Linux"
+DESCARGA="/tmp/descargas_web"
 
-# Formato de cada entrada: "nombre|systemd_unit|puerto|proto"
-# proto = http | https | ftp | ftps
-SERVICIOS_VERIFICAR=()
+mkdir -p "$DESCARGA"
 
-# ─────────────────────────────────────────────────────────────
-# MENÚ PRINCIPAL
-# ─────────────────────────────────────────────────────────────
-main() {
-    if [[ "$EUID" -ne 0 ]]; then
-        echo "Este script debe ejecutarse con sudo o como root."
-        exit 1
-    fi
+# ------------------------------------------------------------
+# 1. MENU PRINCIPAL
+# ------------------------------------------------------------
 
-    while true; do
-        echo ""
-        echo "=========================================================="
-        echo "     PRÁCTICA 7 - ORQUESTADOR DE SERVICIOS (FEDORA)      "
-        echo "=========================================================="
-        echo " 1) Apache (httpd)"
-        echo " 2) Nginx"
-        echo " 3) Tomcat"
-        echo " 4) vsftpd (FTP)"
-        echo " 5) Ver Resumen de Instalaciones"
-        echo " 6) Preparar repositorio FTP local"
-        echo " 7) Cambiar puertos de un servicio"
-        echo " 0) Salir"
-        echo "=========================================================="
-        read -p "Selecciona una opción: " opcion < /dev/tty
+menu_principal() {
+    clear
+    echo "========================================"
+    echo "   INSTALADOR DE SERVICIOS WEB (FTP)   "
+    echo "========================================"
+    echo "1) Apache (httpd)"
+    echo "2) Nginx"
+    echo "3) Tomcat"
+    echo "0) Salir"
+    echo "----------------------------------------"
+    read -rp "Elige un servicio: " opcion
 
-        case "$opcion" in
-            0) echo "Saliendo..."; break ;;
-            5) verificar_resumen; continue ;;
-            6) preparar_repositorio_ftp; continue ;;
-            7) cambiar_puertos; continue ;;
-            1|2|3|4) ;;
-            *) echo "Opción inválida."; continue ;;
-        esac
-
-        echo ""
-        echo "¿Desde dónde deseas instalar?"
-        echo " 1) WEB (repositorio dnf)"
-        echo " 2) FTP (repositorio privado)"
-        echo " 0) Regresar"
-        read -p "Selecciona origen: " origen < /dev/tty
-        [[ "$origen" == "0" ]] && continue
-        [[ "$origen" == "2" ]] && web_ftp="FTP" || web_ftp="WEB"
-
-        ssl=$(preguntar_ssl)
-        [[ "$ssl" == "REGRESAR" ]] && continue
-
-        archivo=""
-        if [[ "$web_ftp" == "FTP" ]]; then
-            case "$opcion" in
-                1) servicio_ftp="Apache" ;;
-                2) servicio_ftp="Nginx"  ;;
-                3) servicio_ftp="Tomcat" ;;
-                4) servicio_ftp="vsftpd" ;;
-            esac
-            archivo=$(listar_versiones_ftp "$servicio_ftp")
-            if [[ "$archivo" == "INVALIDO" || "$archivo" == "REGRESAR" ]]; then
-                echo "Operación cancelada."; continue
-            fi
-        fi
-
-        case "$opcion" in
-            1) instalar_apache  "$archivo" "$web_ftp" "$ssl" ;;
-            2) instalar_nginx   "$archivo" "$web_ftp" "$ssl" ;;
-            3) instalar_tomcat  "$archivo" "$web_ftp" "$ssl" ;;
-            4) instalar_vsftpd  "$archivo" "$web_ftp" "$ssl" ;;
-        esac
-    done
-}
-
-# ─────────────────────────────────────────────────────────────
-# PEDIR PUERTO AL USUARIO
-# Devuelve "HTTP_PORT HTTPS_PORT" separados por espacio
-# ─────────────────────────────────────────────────────────────
-pedir_puerto() {
-    local nombre=$1 default_http=$2 default_https=$3
-
-    local puerto_http
-    while true; do
-        read -p "  Puerto HTTP para $nombre [Enter = $default_http]: " puerto_http < /dev/tty
-        [[ -z "$puerto_http" ]] && puerto_http=$default_http
-        if [[ "$puerto_http" =~ ^[0-9]+$ ]] && \
-           [ "$puerto_http" -ge 1 ] && [ "$puerto_http" -le 65535 ]; then
-            break
-        fi
-        echo "  Puerto inválido. Ingresa un número entre 1 y 65535." > /dev/tty
-    done
-
-    local puerto_https
-    while true; do
-        read -p "  Puerto HTTPS para $nombre [Enter = $default_https]: " puerto_https < /dev/tty
-        [[ -z "$puerto_https" ]] && puerto_https=$default_https
-        if [[ "$puerto_https" =~ ^[0-9]+$ ]] && \
-           [ "$puerto_https" -ge 1 ] && [ "$puerto_https" -le 65535 ]; then
-            if [ "$puerto_https" -eq "$puerto_http" ]; then
-                echo "  El puerto HTTPS no puede ser igual al HTTP." > /dev/tty
-                continue
-            fi
-            break
-        fi
-        echo "  Puerto inválido. Ingresa un número entre 1 y 65535." > /dev/tty
-    done
-
-    for p in "$puerto_http" "$puerto_https"; do
-        if ss -tlnp | grep -q ":$p "; then
-            echo "  ⚠ ADVERTENCIA: el puerto $p ya está en uso." > /dev/tty
-        fi
-    done
-
-    echo "$puerto_http $puerto_https"
-}
-
-# ─────────────────────────────────────────────────────────────
-# NAVEGACIÓN FTP
-# ─────────────────────────────────────────────────────────────
-listar_versiones_ftp() {
-    local servicio=$1
-    echo "" > /dev/tty
-    echo "Buscando instaladores de $servicio en /$FTP_BASE/$servicio/ ..." > /dev/tty
-
-    mapfile -t versiones < <(curl -s -l -u "$FTP_USER:$FTP_PASS" \
-        "ftp://$FTP_SERVER/$FTP_BASE/$servicio/" 2>/dev/null \
-        | grep -v '\.sha256$' | grep -v '\.md5$')
-
-    if [ ${#versiones[@]} -eq 0 ]; then
-        echo "No se encontraron versiones para $servicio." > /dev/tty
-        echo "INVALIDO"; return 1
-    fi
-
-    echo "Versiones disponibles:" > /dev/tty
-    for i in "${!versiones[@]}"; do
-        echo "$((i + 1))) ${versiones[$i]}" > /dev/tty
-    done
-    echo "0) Regresar" > /dev/tty
-
-    local sel_ver
-    read -p "Selecciona la versión: " sel_ver < /dev/tty
-
-    if [[ "$sel_ver" == "0" ]]; then
-        echo "REGRESAR"
-    elif [[ "$sel_ver" =~ ^[0-9]+$ ]] && \
-         [ "$sel_ver" -ge 1 ] && [ "$sel_ver" -le "${#versiones[@]}" ]; then
-        echo "${versiones[$((sel_ver - 1))]}"
-    else
-        echo "INVALIDO"
-    fi
-}
-
-# ─────────────────────────────────────────────────────────────
-# DESCARGA Y VALIDACIÓN DE INTEGRIDAD (SHA256 con fallback MD5)
-# FIX: ahora intenta SHA256 primero; si no existe, intenta MD5;
-#      si tampoco existe, advierte y continúa.
-# ─────────────────────────────────────────────────────────────
-descargar_y_validar_hash() {
-    local servicio=$1 archivo=$2
-    local ruta="ftp://$FTP_SERVER/$FTP_BASE/$servicio/"
-
-    echo "Descargando $archivo desde FTP..." > /dev/tty
-    cd /tmp || exit 1
-
-    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}"
-
-    if [[ ! -f "$archivo" ]]; then
-        echo "ERROR: No se pudo descargar $archivo." > /dev/tty
-        return 1
-    fi
-
-    # ── Intentar SHA256 ───────────────────────────────────────
-    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.sha256" 2>/dev/null
-
-    if [[ -s "${archivo}.sha256" ]]; then
-        local hash_remoto hash_local
-        hash_remoto=$(awk '{print $1}' "${archivo}.sha256")
-        hash_local=$(sha256sum "$archivo" | awk '{print $1}')
-        if [ "$hash_remoto" = "$hash_local" ]; then
-            echo "✔ Integridad SHA256 verificada." > /dev/tty
-            rm -f "${archivo}.sha256"
-            return 0
-        else
-            echo "✘ ERROR DE INTEGRIDAD SHA256: Hash no coincide. Abortando." > /dev/tty
-            rm -f "$archivo" "${archivo}.sha256"
-            return 1
-        fi
-    fi
-
-    # ── Fallback MD5 ──────────────────────────────────────────
-    rm -f "${archivo}.sha256"
-    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.md5" 2>/dev/null
-
-    if [[ -s "${archivo}.md5" ]]; then
-        local hash_remoto hash_local
-        hash_remoto=$(awk '{print $1}' "${archivo}.md5")
-        hash_local=$(md5sum "$archivo" | awk '{print $1}')
-        if [ "$hash_remoto" = "$hash_local" ]; then
-            echo "✔ Integridad MD5 verificada." > /dev/tty
-            rm -f "${archivo}.md5"
-            return 0
-        else
-            echo "✘ ERROR DE INTEGRIDAD MD5: Hash no coincide. Abortando." > /dev/tty
-            rm -f "$archivo" "${archivo}.md5"
-            return 1
-        fi
-    fi
-
-    # ── Sin hash disponible ───────────────────────────────────
-    rm -f "${archivo}.md5"
-    echo "⚠ ADVERTENCIA: No se encontró archivo .sha256 ni .md5. Se omite validación." > /dev/tty
-    return 0
-}
-
-# ─────────────────────────────────────────────────────────────
-# INSTALACIÓN DESDE PAQUETE (detecta extensión)
-# ─────────────────────────────────────────────────────────────
-instalar_paquete_local() {
-    local archivo="/tmp/$1" servicio="$2"
-    echo "Instalando $1 ..." > /dev/tty
-    case "$archivo" in
-        *.rpm)
-            dnf install -y "$archivo" > /dev/null 2>&1 ;;
-        *.tar.gz|*.tgz)
-            mkdir -p "/opt/$servicio"
-            tar -xzf "$archivo" -C "/opt/$servicio" --strip-components=1
-            echo "✔ Extraído en /opt/$servicio" > /dev/tty ;;
-        *.tar.bz2)
-            mkdir -p "/opt/$servicio"
-            tar -xjf "$archivo" -C "/opt/$servicio" --strip-components=1
-            echo "✔ Extraído en /opt/$servicio" > /dev/tty ;;
-        *.zip)
-            mkdir -p "/opt/$servicio"
-            unzip -q "$archivo" -d "/opt/$servicio"
-            echo "✔ Extraído en /opt/$servicio" > /dev/tty ;;
-        *)
-            echo "ERROR: Formato no reconocido: $archivo" > /dev/tty
-            return 1 ;;
+    case "$opcion" in
+        1) flujo_instalacion "Apache"  instalar_apache  ;;
+        2) flujo_instalacion "Nginx"   instalar_nginx   ;;
+        3) flujo_instalacion "Tomcat"  instalar_tomcat  ;;
+        0) echo "Saliendo..."; exit 0 ;;
+        *) echo "Opcion invalida."; sleep 1; menu_principal ;;
     esac
-    return 0
 }
 
-# ─────────────────────────────────────────────────────────────
-# PREGUNTA SSL
-# ─────────────────────────────────────────────────────────────
-preguntar_ssl() {
+# ------------------------------------------------------------
+# 2. PEDIR PUERTO AL USUARIO
+# ------------------------------------------------------------
+
+pedir_puerto() {
+    local puerto_default="$1"
+    local puerto
+
     while true; do
-        local resp
-        read -p "¿Desea activar SSL? [S/N] (0 para regresar): " resp < /dev/tty
-        [[ "$resp" =~ ^[sS]$ ]] && echo "S" && return
-        [[ "$resp" =~ ^[nN]$ ]] && echo "N" && return
-        [[ "$resp" == "0" ]]    && echo "REGRESAR" && return
-        echo "Respuesta inválida." > /dev/tty
+        read -rp "Puerto para el servicio [$puerto_default]: " puerto
+        [[ -z "$puerto" ]] && puerto="$puerto_default"
+
+        if ! [[ "$puerto" =~ ^[0-9]+$ ]] || \
+           [ "$puerto" -lt 1 ] || [ "$puerto" -gt 65535 ]; then
+            echo "Puerto invalido. Ingresa un numero entre 1 y 65535."
+            continue
+        fi
+
+        if ss -tlnp | grep -q ":$puerto "; then
+            echo "AVISO: El puerto $puerto ya esta en uso."
+            read -rp "Usarlo de todas formas? [s/N]: " forzar
+            [[ "$forzar" =~ ^[sS]$ ]] && break
+        else
+            break
+        fi
     done
+
+    echo "$puerto"
 }
 
-# ─────────────────────────────────────────────────────────────
-# CERTIFICADO AUTOFIRMADO
-# ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# 3. FLUJO GENERICO
+# ------------------------------------------------------------
+
+flujo_instalacion() {
+    local servicio="$1"
+    local fn_instalar="$2"
+
+    echo ""
+    echo "==> Conectando al FTP: ftp://$FTP_IP$FTP_BASE/$servicio/"
+
+    mapfile -t archivos < <(
+        curl -s -l -u "$FTP_USER:$FTP_PASS" \
+            "ftp://$FTP_IP$FTP_BASE/$servicio/" \
+        | grep -v '\.sha256$' | grep -v '\.md5$' | grep -v '^$'
+    )
+
+    if [ ${#archivos[@]} -eq 0 ]; then
+        echo "ERROR: No se encontraron archivos en el FTP para $servicio."
+        read -rp "Presiona Enter..." ; menu_principal
+        return
+    fi
+
+    echo ""
+    echo "Archivos disponibles:"
+    for i in "${!archivos[@]}"; do
+        echo "  $((i+1))) ${archivos[$i]}"
+    done
+    echo "  0) Regresar"
+    echo ""
+    read -rp "Selecciona el numero: " sel
+
+    [[ "$sel" == "0" ]] && menu_principal && return
+
+    if ! [[ "$sel" =~ ^[0-9]+$ ]] || \
+       [ "$sel" -lt 1 ] || [ "$sel" -gt "${#archivos[@]}" ]; then
+        echo "Seleccion invalida."
+        sleep 1; flujo_instalacion "$servicio" "$fn_instalar"
+        return
+    fi
+
+    local archivo="${archivos[$((sel-1))]}"
+    local url_base="ftp://$FTP_IP$FTP_BASE/$servicio"
+
+    # SSL
+    echo ""
+    read -rp "Activar SSL (HTTPS)? [s/N]: " resp_ssl
+    local ssl="N"
+    [[ "$resp_ssl" =~ ^[sS]$ ]] && ssl="S"
+
+    # Puerto
+    echo ""
+    local puerto_default=80
+    [[ "$ssl" == "S" ]] && puerto_default=443
+    local puerto
+    puerto=$(pedir_puerto "$puerto_default")
+
+    # Descarga
+    echo ""
+    echo "==> Descargando: $archivo"
+    curl -s --show-error -u "$FTP_USER:$FTP_PASS" \
+        "$url_base/$archivo" -o "$DESCARGA/$archivo"
+
+    echo "==> Descargando hash SHA256..."
+    curl -s -u "$FTP_USER:$FTP_PASS" \
+        "$url_base/$archivo.sha256" -o "$DESCARGA/$archivo.sha256"
+
+    # Validar
+    echo "==> Validando integridad..."
+    if [ -f "$DESCARGA/$archivo.sha256" ]; then
+        local hash_remoto hash_local
+        hash_remoto=$(awk '{print $1}' "$DESCARGA/$archivo.sha256")
+        hash_local=$(sha256sum "$DESCARGA/$archivo" | awk '{print $1}')
+
+        if [ "$hash_remoto" != "$hash_local" ]; then
+            echo "ERROR: Hash no coincide. Archivo corrupto."
+            echo "  Esperado:  $hash_remoto"
+            echo "  Calculado: $hash_local"
+            read -rp "Presiona Enter..." ; menu_principal
+            return
+        fi
+        echo "OK: Integridad verificada."
+    else
+        echo "AVISO: No hay .sha256, continuando sin validacion."
+    fi
+
+    echo ""
+    echo "==> Instalando $servicio en puerto $puerto..."
+    "$fn_instalar" "$DESCARGA/$archivo" "$ssl" "$puerto"
+
+    verificar_servicio "$servicio" "$ssl" "$puerto"
+
+    read -rp "Presiona Enter para continuar..." ; menu_principal
+}
+
+# ------------------------------------------------------------
+# 4. VERIFICACION FINAL
+# ------------------------------------------------------------
+
+verificar_servicio() {
+    local servicio="$1"
+    local ssl="$2"
+    local puerto="$3"
+
+    echo ""
+    echo "==> Esperando que $servicio levante en puerto $puerto..."
+    sleep 5
+
+    if ss -tlnp | grep -q ":$puerto "; then
+        local proto="http"
+        [[ "$ssl" == "S" ]] && proto="https"
+        echo ""
+        echo "=============================================="
+        echo " $servicio ACTIVO"
+        echo " $proto://$FTP_IP:$puerto"
+        echo "=============================================="
+    else
+        echo "ADVERTENCIA: El puerto $puerto no responde aun."
+        echo "Revisa: sudo systemctl status $servicio"
+    fi
+}
+
+# ------------------------------------------------------------
+# 5. HELPERS
+# ------------------------------------------------------------
+
+detener_otros_servidores_web() {
+    echo "==> Deteniendo otros servidores web..."
+    sudo systemctl stop httpd  2>/dev/null
+    sudo systemctl stop nginx  2>/dev/null
+    sudo systemctl stop tomcat 2>/dev/null
+    sudo rm -rf /var/www/html/*
+    sudo mkdir -p /var/www/html
+}
+
 generar_ssl() {
-    local servicio=$1
-    local cert_dir="/etc/ssl/$servicio"
-    mkdir -p "$cert_dir"
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-        -keyout "$cert_dir/server.key" \
-        -out    "$cert_dir/server.crt" \
+    local servicio="$1"
+    local dir="/etc/ssl/$servicio"
+    sudo mkdir -p "$dir"
+    sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "$dir/server.key" -out "$dir/server.crt" \
         -subj "/C=MX/ST=Sinaloa/L=Los Mochis/O=Reprobados/CN=www.reprobados.com" \
         > /dev/null 2>&1
-    echo "$cert_dir"
+    echo "$dir"
 }
 
-# ─────────────────────────────────────────────────────────────
-# PÁGINA HTML POR SERVICIO
-# ─────────────────────────────────────────────────────────────
-crear_index() {
-    local servidor=$1 ssl_status=$2 puerto=$3 docroot=$4
-    local proto="HTTP"
-    [[ "$ssl_status" == "S" ]] && proto="HTTPS"
-    mkdir -p "$docroot"
-    cat > "$docroot/index.html" <<EOF
-<html>
+obtener_version() {
+    local servicio="$1"
+    case "$servicio" in
+        Apache)  httpd -v 2>/dev/null | grep "Server version" | awk '{print $3}' ;;
+        Nginx)   nginx -v 2>&1 | awk -F/ '{print $2}' ;;
+        Tomcat)  find /usr/share/tomcat* /usr/lib/tomcat* \
+                      -name "RELEASE-NOTES" 2>/dev/null \
+                 | head -1 \
+                 | xargs grep -m1 "Apache Tomcat" 2>/dev/null \
+                 | awk '{print $3}' ;;
+    esac
+}
+
+# Pagina minimalista: solo texto plano, sin estilos
+pagina_inicio() {
+    local servicio="$1"
+    local puerto="$2"
+    local version="$3"
+
+    sudo bash -c "cat > /var/www/html/index.html" <<HTML
+<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><title>$servicio</title></head>
 <body>
-    <p>Servidor: $servidor</p>
-    <p>Protocolo: $proto</p>
-    <p>Puerto: $puerto</p>
+  <p>Servicio: $servicio</p>
+  <p>Puerto: $puerto</p>
+  <p>Version: $version</p>
 </body>
 </html>
-EOF
+HTML
 }
 
-# ─────────────────────────────────────────────────────────────
-# FIREWALL
-# ─────────────────────────────────────────────────────────────
-abrir_puerto_firewall() {
-    local puerto=$1 proto=${2:-tcp}
-    if systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --add-port="$puerto/$proto" > /dev/null 2>&1
-    fi
+abrir_firewall() {
+    for p in "$@"; do
+        sudo firewall-cmd --permanent --add-port="$p" > /dev/null 2>&1
+    done
+    sudo firewall-cmd --reload > /dev/null 2>&1
 }
 
-recargar_firewall() {
-    systemctl is-active --quiet firewalld && firewall-cmd --reload > /dev/null 2>&1
-}
+# ------------------------------------------------------------
+# 6. INSTALADORES
+# ------------------------------------------------------------
 
-# ─────────────────────────────────────────────────────────────
-# APACHE
-# FIX: añade HSTS en el VirtualHost HTTPS
-# ─────────────────────────────────────────────────────────────
 instalar_apache() {
-    local archivo=$1 web_ftp=$2 ssl=$3
-    local docroot="/var/www/apache"
-    local conf_dir="/etc/httpd/conf.d"
+    local _archivo="$1"
+    local ssl="$2"
+    local puerto="$3"
 
-    echo "" > /dev/tty
-    echo "── Configuración de puertos para Apache ─────────────────" > /dev/tty
-    read puerto_http puerto_https <<< $(pedir_puerto "Apache" 80 443)
+    detener_otros_servidores_web
+    sudo dnf install -y httpd > /dev/null
+    [[ "$ssl" == "S" ]] && sudo dnf install -y mod_ssl > /dev/null
 
-    if [[ "$web_ftp" == "FTP" ]]; then
-        descargar_y_validar_hash "Apache" "$archivo" || return 1
-        instalar_paquete_local "$archivo" "httpd" || return 1
-    else
-        echo "Instalando Apache desde DNF..." > /dev/tty
-        dnf install -y httpd mod_ssl > /dev/null
-    fi
+    local version; version=$(obtener_version "Apache")
+    pagina_inicio "Apache" "$puerto" "$version"
+    sudo chcon -R --type=httpd_sys_content_t /var/www/html 2>/dev/null || true
 
-    mkdir -p "$conf_dir"
-    local puerto_display=$puerto_http
-    [[ "$ssl" == "S" ]] && puerto_display=$puerto_https
-    crear_index "Apache (httpd)" "$ssl" "$puerto_display" "$docroot"
-    chcon -R -t httpd_sys_content_t "$docroot" > /dev/null 2>&1
-
-    rm -f "$conf_dir/reprobados_apache.conf"
-    # FIX: eliminar ssl.conf y cualquier .bak previo para evitar Listen duplicado
-    rm -f "$conf_dir/ssl.conf" "$conf_dir/ssl.conf.bak"
-    # FIX: comentar Listen 80 y Listen 443 del httpd.conf principal
-    #      para que solo nuestro conf los defina y no haya conflicto
-    sed -i 's/^Listen 80$/#Listen 80/' /etc/httpd/conf/httpd.conf 2>/dev/null
-    sed -i 's/^Listen 443$/#Listen 443/' /etc/httpd/conf/httpd.conf 2>/dev/null
+    # Quitar el Listen 80 por defecto para no colisionar
+    sudo sed -i "s/^Listen 80$/# Listen 80/" /etc/httpd/conf/httpd.conf 2>/dev/null || true
 
     if [[ "$ssl" == "S" ]]; then
         local dir; dir=$(generar_ssl "apache")
-        cat > "$conf_dir/reprobados_apache.conf" <<EOF
-Listen $puerto_http
-Listen $puerto_https
-
-<VirtualHost *:$puerto_http>
+        sudo bash -c "cat > /etc/httpd/conf.d/reprobados.conf" <<CONF
+Listen $puerto
+<VirtualHost *:$puerto>
     ServerName www.reprobados.com
-    Redirect permanent / https://www.reprobados.com:$puerto_https/
-</VirtualHost>
-
-<VirtualHost *:$puerto_https>
-    ServerName www.reprobados.com
-    DocumentRoot $docroot
+    DocumentRoot /var/www/html
     SSLEngine on
     SSLCertificateFile    $dir/server.crt
     SSLCertificateKeyFile $dir/server.key
-    # FIX: HSTS - fuerza HTTPS durante 1 año en el navegador
-    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    <Directory /var/www/html>
+        AllowOverride All
+        Require all granted
+    </Directory>
 </VirtualHost>
-EOF
-        abrir_puerto_firewall "$puerto_http"
-        abrir_puerto_firewall "$puerto_https"
-        SERVICIOS_VERIFICAR+=("Apache|httpd|$puerto_http|http")
-        SERVICIOS_VERIFICAR+=("Apache-SSL|httpd|$puerto_https|https")
+CONF
     else
-        cat > "$conf_dir/reprobados_apache.conf" <<EOF
-Listen $puerto_http
-
-<VirtualHost *:$puerto_http>
+        sudo bash -c "cat > /etc/httpd/conf.d/reprobados.conf" <<CONF
+Listen $puerto
+<VirtualHost *:$puerto>
     ServerName www.reprobados.com
-    DocumentRoot $docroot
+    DocumentRoot /var/www/html
+    <Directory /var/www/html>
+        AllowOverride All
+        Require all granted
+    </Directory>
 </VirtualHost>
-EOF
-        abrir_puerto_firewall "$puerto_http"
-        SERVICIOS_VERIFICAR+=("Apache|httpd|$puerto_http|http")
+CONF
     fi
 
-    setsebool -P httpd_can_network_connect 1 > /dev/null 2>&1
-    recargar_firewall
-    systemctl enable --now httpd > /dev/null
-    systemctl restart httpd
-
-    RESUMEN_INSTALACIONES+=("Apache | SSL:$ssl | HTTP:$puerto_http  HTTPS:$puerto_https")
-    echo "✔ Apache instalado. Accede en http://127.0.0.1:$puerto_http" > /dev/tty
+    abrir_firewall "$puerto/tcp"
+    sudo systemctl enable --now httpd
+    sudo systemctl restart httpd
 }
 
-# ─────────────────────────────────────────────────────────────
-# NGINX
-# FIX: añade HSTS en el bloque server SSL
-# ─────────────────────────────────────────────────────────────
 instalar_nginx() {
-    local archivo=$1 web_ftp=$2 ssl=$3
-    local docroot="/var/www/nginx"
-    local conf_dir="/etc/nginx/conf.d"
+    local _archivo="$1"
+    local ssl="$2"
+    local puerto="$3"
 
-    echo "" > /dev/tty
-    echo "── Configuración de puertos para Nginx ──────────────────" > /dev/tty
-    read puerto_http puerto_https <<< $(pedir_puerto "Nginx" 8081 8444)
+    detener_otros_servidores_web
+    sudo dnf install -y nginx > /dev/null
 
-    if [[ "$web_ftp" == "FTP" ]]; then
-        descargar_y_validar_hash "Nginx" "$archivo" || return 1
-        instalar_paquete_local "$archivo" "nginx" || return 1
-    else
-        echo "Instalando Nginx desde DNF..." > /dev/tty
-        dnf install -y nginx > /dev/null
+    local version; version=$(obtener_version "Nginx")
+    pagina_inicio "Nginx" "$puerto" "$version"
+    sudo chcon -R --type=httpd_sys_content_t /var/www/html 2>/dev/null || true
+    sudo setsebool -P httpd_can_network_connect 1 2>/dev/null || true
+
+    # SELinux: registrar puerto personalizado si no es estandar
+    if [[ "$puerto" != "80" && "$puerto" != "443" ]]; then
+        sudo semanage port -a -t http_port_t -p tcp "$puerto" 2>/dev/null || \
+        sudo semanage port -m -t http_port_t -p tcp "$puerto" 2>/dev/null || true
     fi
 
-    mkdir -p "$conf_dir"
-    local puerto_display=$puerto_http
-    [[ "$ssl" == "S" ]] && puerto_display=$puerto_https
-    crear_index "Nginx" "$ssl" "$puerto_display" "$docroot"
-    chcon -R -t httpd_sys_content_t "$docroot" > /dev/null 2>&1
-
-    cat > /etc/nginx/nginx.conf <<'NGINXEOF'
-user nginx;
-worker_processes auto;
-error_log /var/log/nginx/error.log;
-pid /run/nginx.pid;
-
-events {
-    worker_connections 1024;
-}
-
-http {
-    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
-                      '$status $body_bytes_sent "$http_referer" '
-                      '"$http_user_agent"';
-    access_log  /var/log/nginx/access.log  main;
-    sendfile        on;
-    tcp_nopush      on;
-    keepalive_timeout 65;
-    include     /etc/nginx/mime.types;
-    default_type application/octet-stream;
-    include /etc/nginx/conf.d/*.conf;
-}
-NGINXEOF
-
-    rm -f "$conf_dir/reprobados_nginx.conf"
+    # Desactivar bloque default del nginx.conf para evitar conflictos
+    sudo sed -i 's/^\s*listen\s*80\s*default_server/    # listen 80 default_server/' \
+        /etc/nginx/nginx.conf 2>/dev/null || true
+    sudo sed -i 's/^\s*listen\s*\[::\]:80\s*default_server/    # listen [::]:80 default_server/' \
+        /etc/nginx/nginx.conf 2>/dev/null || true
 
     if [[ "$ssl" == "S" ]]; then
         local dir; dir=$(generar_ssl "nginx")
-        # FIX: add_header HSTS en el bloque SSL
-        cat > "$conf_dir/reprobados_nginx.conf" <<EOF
+        sudo bash -c "cat > /etc/nginx/conf.d/reprobados.conf" <<CONF
 server {
-    listen $puerto_http;
-    server_name www.reprobados.com;
-    return 301 https://\$host:$puerto_https\$request_uri;
-}
-
-server {
-    listen $puerto_https ssl;
+    listen $puerto ssl;
     server_name www.reprobados.com;
     ssl_certificate     $dir/server.crt;
     ssl_certificate_key $dir/server.key;
-    # FIX: HSTS - fuerza HTTPS durante 1 año en el navegador
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    root  $docroot;
+    root  /var/www/html;
     index index.html;
 }
-EOF
-        abrir_puerto_firewall "$puerto_http"
-        abrir_puerto_firewall "$puerto_https"
-        SERVICIOS_VERIFICAR+=("Nginx|nginx|$puerto_http|http")
-        SERVICIOS_VERIFICAR+=("Nginx-SSL|nginx|$puerto_https|https")
+CONF
     else
-        cat > "$conf_dir/reprobados_nginx.conf" <<EOF
+        sudo bash -c "cat > /etc/nginx/conf.d/reprobados.conf" <<CONF
 server {
-    listen $puerto_http;
+    listen $puerto;
     server_name www.reprobados.com;
-    root  $docroot;
+    root  /var/www/html;
     index index.html;
 }
-EOF
-        abrir_puerto_firewall "$puerto_http"
-        SERVICIOS_VERIFICAR+=("Nginx|nginx|$puerto_http|http")
+CONF
     fi
 
-    setsebool -P httpd_can_network_connect 1 > /dev/null 2>&1
-    # FIX: registrar puertos no estándar en SELinux para que Nginx pueda usarlos
-    semanage port -a -t http_port_t -p tcp "$puerto_http" > /dev/null 2>&1
-    semanage port -a -t http_port_t -p tcp "$puerto_https" > /dev/null 2>&1
-    recargar_firewall
-    systemctl enable --now nginx > /dev/null
-    systemctl restart nginx
-
-    RESUMEN_INSTALACIONES+=("Nginx  | SSL:$ssl | HTTP:$puerto_http  HTTPS:$puerto_https")
-    echo "✔ Nginx instalado. Accede en http://127.0.0.1:$puerto_http" > /dev/tty
+    abrir_firewall "$puerto/tcp"
+    sudo systemctl enable --now nginx
+    sudo systemctl restart nginx
 }
 
-# ─────────────────────────────────────────────────────────────
-# TOMCAT
-# FIX: genera web.xml con security-constraint CONFIDENTIAL
-#      para que Tomcat fuerce la redirección HTTP→HTTPS de verdad
-# ─────────────────────────────────────────────────────────────
 instalar_tomcat() {
-    local archivo=$1 web_ftp=$2 ssl=$3
+    local _archivo="$1"
+    local ssl="$2"
+    local puerto="$3"
 
-    echo "" > /dev/tty
-    echo "── Configuración de puertos para Tomcat ─────────────────" > /dev/tty
-    read puerto_http puerto_https <<< $(pedir_puerto "Tomcat" 8080 8443)
+    detener_otros_servidores_web
+    sudo dnf install -y java-latest-openjdk tomcat > /dev/null
 
-    echo "Instalando Java y Tomcat..." > /dev/tty
-    dnf install -y java-17-openjdk > /dev/null
+    local T_USER
+    T_USER=$(grep -E '^tomcat' /etc/passwd | cut -d: -f1 | head -n1)
+    [[ -z "$T_USER" ]] && T_USER="tomcat"
 
-    if [[ "$web_ftp" == "FTP" ]]; then
-        descargar_y_validar_hash "Tomcat" "$archivo" || return 1
-        instalar_paquete_local "$archivo" "tomcat" || return 1
-    else
-        dnf install -y tomcat > /dev/null
+    # setcap solo si el puerto es privilegiado (< 1024)
+    if [ "$puerto" -lt 1024 ]; then
+        local JAVA_BIN
+        JAVA_BIN=$(readlink -f "$(which java)")
+        sudo setcap 'cap_net_bind_service=+ep' "$JAVA_BIN"
     fi
 
-    local T_USER="tomcat"
-    local docroot="/var/lib/tomcat/webapps/ROOT"
-    local puerto_display=$puerto_http
-    [[ "$ssl" == "S" ]] && puerto_display=$puerto_https
-    crear_index "Tomcat" "$ssl" "$puerto_display" "$docroot"
-    chown -R "$T_USER:$T_USER" "$docroot"
+    local version; version=$(obtener_version "Tomcat")
+    pagina_inicio "Tomcat" "$puerto" "$version"
+    sudo mkdir -p /var/lib/tomcat/webapps/ROOT
+    sudo cp /var/www/html/index.html /var/lib/tomcat/webapps/ROOT/index.html
+    sudo chown -R "$T_USER:$T_USER" /var/lib/tomcat/webapps/ROOT
 
     if [[ "$ssl" == "S" ]]; then
         local dir; dir=$(generar_ssl "tomcat")
         local ks="/etc/ssl/tomcat/keystore.p12"
-
-        openssl pkcs12 -export \
+        sudo openssl pkcs12 -export \
             -in "$dir/server.crt" -inkey "$dir/server.key" \
-            -out "$ks" -name tomcat \
-            -password pass:reprobados > /dev/null 2>&1
-        chown "$T_USER:$T_USER" "$ks"
+            -out "$ks" -name tomcat -passout pass:reprobados > /dev/null 2>&1
+        sudo chown "$T_USER:$T_USER" "$ks"
 
-        cat > /etc/tomcat/server.xml <<EOF
+        sudo bash -c "cat > /etc/tomcat/server.xml" <<XML
 <Server port="8005" shutdown="SHUTDOWN">
   <Service name="Catalina">
-    <Connector port="$puerto_http" protocol="HTTP/1.1"
-               connectionTimeout="20000"
-               redirectPort="$puerto_https" />
-    <Connector port="$puerto_https"
+    <Connector port="$puerto"
                protocol="org.apache.coyote.http11.Http11NioProtocol"
                maxThreads="150" SSLEnabled="true">
       <SSLHostConfig>
         <Certificate certificateKeystoreFile="$ks"
                      type="RSA"
-                     certificateKeystorePassword="reprobados" />
+                     certificateKeystorePassword="reprobados"/>
       </SSLHostConfig>
     </Connector>
     <Engine name="Catalina" defaultHost="localhost">
       <Host name="localhost" appBase="webapps"
-            unpackWARs="true" autoDeploy="true" />
+            unpackWARs="true" autoDeploy="true"/>
     </Engine>
   </Service>
 </Server>
-EOF
-
-        # FIX: web.xml con security-constraint CONFIDENTIAL
-        # Esto hace que Tomcat redirija REALMENTE el tráfico HTTP al puerto HTTPS
-        # (redirectPort en server.xml solo funciona si existe esta restricción)
-        mkdir -p "$docroot/WEB-INF"
-        cat > "$docroot/WEB-INF/web.xml" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<web-app xmlns="https://jakarta.ee/xml/ns/jakartaee"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee
-                             https://jakarta.ee/xml/ns/jakartaee/web-app_5_0.xsd"
-         version="5.0">
-
-  <!-- FIX: Forzar HTTPS en todos los recursos -->
-  <security-constraint>
-    <web-resource-collection>
-      <web-resource-name>Forzar HTTPS</web-resource-name>
-      <url-pattern>/*</url-pattern>
-    </web-resource-collection>
-    <user-data-constraint>
-      <!-- CONFIDENTIAL le dice a Tomcat que use el redirectPort (HTTPS) -->
-      <transport-guarantee>CONFIDENTIAL</transport-guarantee>
-    </user-data-constraint>
-  </security-constraint>
-
-</web-app>
-EOF
-        chown -R "$T_USER:$T_USER" "$docroot/WEB-INF"
-
-        abrir_puerto_firewall "$puerto_http"
-        abrir_puerto_firewall "$puerto_https"
-        SERVICIOS_VERIFICAR+=("Tomcat|tomcat|$puerto_http|http")
-        SERVICIOS_VERIFICAR+=("Tomcat-SSL|tomcat|$puerto_https|https")
+XML
     else
-        cat > /etc/tomcat/server.xml <<EOF
+        sudo bash -c "cat > /etc/tomcat/server.xml" <<XML
 <Server port="8005" shutdown="SHUTDOWN">
   <Service name="Catalina">
-    <Connector port="$puerto_http" protocol="HTTP/1.1"
-               connectionTimeout="20000" />
+    <Connector port="$puerto" protocol="HTTP/1.1" connectionTimeout="20000"/>
     <Engine name="Catalina" defaultHost="localhost">
       <Host name="localhost" appBase="webapps"
-            unpackWARs="true" autoDeploy="true" />
+            unpackWARs="true" autoDeploy="true"/>
     </Engine>
   </Service>
 </Server>
-EOF
-        abrir_puerto_firewall "$puerto_http"
-        SERVICIOS_VERIFICAR+=("Tomcat|tomcat|$puerto_http|http")
+XML
     fi
 
-    # FIX: registrar puertos no estándar en SELinux para Tomcat
-    semanage port -a -t http_port_t -p tcp "$puerto_http" > /dev/null 2>&1
-    semanage port -a -t http_port_t -p tcp "$puerto_https" > /dev/null 2>&1
-    recargar_firewall
-    systemctl enable --now tomcat > /dev/null
-    systemctl restart tomcat
-    echo "Esperando que Tomcat levante..." > /dev/tty
+    abrir_firewall "$puerto/tcp"
+    sudo systemctl enable --now tomcat
+    sudo systemctl restart tomcat
     sleep 8
-
-    RESUMEN_INSTALACIONES+=("Tomcat | SSL:$ssl | HTTP:$puerto_http  HTTPS:$puerto_https")
-    echo "✔ Tomcat instalado. Accede en http://127.0.0.1:$puerto_http" > /dev/tty
 }
 
-# ─────────────────────────────────────────────────────────────
-# VSFTPD (puertos fijos 21 / 990)
-# ─────────────────────────────────────────────────────────────
-instalar_vsftpd() {
-    local archivo=$1 web_ftp=$2 ssl=$3
-
-    if [[ "$web_ftp" == "FTP" ]]; then
-        descargar_y_validar_hash "vsftpd" "$archivo" || return 1
-        instalar_paquete_local "$archivo" "vsftpd" || return 1
-    else
-        echo "Instalando vsftpd desde DNF..." > /dev/tty
-        dnf install -y vsftpd openssl > /dev/null
-    fi
-
-    grep -q "/bin/bash" /etc/shells || echo /bin/bash >> /etc/shells
-    mkdir -p /srv/ftp/{anon,autenticados,grupos/general,grupos/reprobados,grupos/recursadores}
-    mkdir -p /etc/vsftpd/ssl
-
-    if [[ "$ssl" == "S" ]]; then
-        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-            -keyout /etc/vsftpd/ssl/vsftpd.key \
-            -out    /etc/vsftpd/ssl/vsftpd.crt \
-            -subj "/C=MX/ST=Sinaloa/L=Los Mochis/O=Reprobados/CN=www.reprobados.com" \
-            > /dev/null 2>&1
-    fi
-
-    setsebool -P ftpd_full_access 1 > /dev/null 2>&1
-    setsebool -P allow_ftpd_full_access 1 > /dev/null 2>&1
-
-    cat > /etc/vsftpd/vsftpd.conf <<EOF
-local_enable=YES
-write_enable=YES
-local_umask=002
-dirmessage_enable=YES
-use_localtime=YES
-xferlog_enable=YES
-connect_from_port_20=YES
-listen=YES
-listen_ipv6=NO
-pam_service_name=vsftpd
-
-user_sub_token=\$USER
-chroot_local_user=YES
-allow_writeable_chroot=YES
-local_root=/srv/ftp/autenticados/\$USER
-
-pasv_enable=YES
-pasv_min_port=40000
-pasv_max_port=50000
-pasv_address=$FTP_SERVER
-EOF
-
-    if [[ "$ssl" == "S" ]]; then
-        cat >> /etc/vsftpd/vsftpd.conf <<EOF
-
-listen_port=990
-implicit_ssl=YES
-ssl_enable=YES
-allow_anon_ssl=NO
-force_local_data_ssl=YES
-force_local_logins_ssl=YES
-ssl_tlsv1=YES
-ssl_sslv2=NO
-ssl_sslv3=NO
-require_ssl_reuse=NO
-ssl_ciphers=HIGH
-rsa_cert_file=/etc/vsftpd/ssl/vsftpd.crt
-rsa_private_key_file=/etc/vsftpd/ssl/vsftpd.key
-EOF
-        abrir_puerto_firewall 990
-        SERVICIOS_VERIFICAR+=("vsftpd-FTPS|vsftpd|990|ftps")
-    else
-        cat >> /etc/vsftpd/vsftpd.conf <<EOF
-
-anonymous_enable=YES
-anon_root=/srv/ftp/anon
-anon_upload_enable=NO
-anon_mkdir_write_enable=NO
-anon_other_write_enable=NO
-EOF
-        abrir_puerto_firewall 21
-        SERVICIOS_VERIFICAR+=("vsftpd|vsftpd|21|ftp")
-    fi
-
-    abrir_puerto_firewall 20
-    abrir_puerto_firewall "40000-50000"
-    recargar_firewall
-
-    systemctl enable --now vsftpd > /dev/null
-    systemctl restart vsftpd
-
-    RESUMEN_INSTALACIONES+=("vsftpd | SSL:$ssl | FTP:21  FTPS:990")
-    echo "✔ vsftpd instalado correctamente." > /dev/tty
-}
-
-# ─────────────────────────────────────────────────────────────
-# VERIFICACIÓN ACTIVA DE UN SERVICIO HTTP/HTTPS
-# FIX: función existente, sin cambios (ya estaba bien)
-# ─────────────────────────────────────────────────────────────
-verificar_http() {
-    local nombre=$1 servicio=$2 puerto=$3 proto=$4
-    local estado="INACTIVO"
-    systemctl is-active --quiet "$servicio" 2>/dev/null && estado="ACTIVO"
-
-    local resp="N/A"
-    if [[ "$proto" == "https" ]]; then
-        resp=$(curl -sk --max-time 5 "https://127.0.0.1:$puerto" \
-               -o /dev/null -w "%{http_code}" 2>/dev/null)
-    elif [[ "$proto" == "http" ]]; then
-        resp=$(curl -s  --max-time 5 "http://127.0.0.1:$puerto" \
-               -o /dev/null -w "%{http_code}" 2>/dev/null)
-    fi
-
-    echo "  [$nombre] Proceso: $estado | Puerto $puerto ($proto): HTTP $resp"
-}
-
-# ─────────────────────────────────────────────────────────────
-# VERIFICACIÓN ACTIVA DE UN SERVICIO FTP/FTPS
-# FIX: función nueva; usa nc para comprobar que el puerto
-#      está abierto y acepta conexiones TCP
-# ─────────────────────────────────────────────────────────────
-verificar_ftp() {
-    local nombre=$1 servicio=$2 puerto=$3
-    local estado="INACTIVO"
-    systemctl is-active --quiet "$servicio" 2>/dev/null && estado="ACTIVO"
-
-    local conexion="CERRADO"
-    if nc -z -w3 127.0.0.1 "$puerto" 2>/dev/null; then
-        conexion="ABIERTO"
-    fi
-
-    echo "  [$nombre] Proceso: $estado | Puerto $puerto (TCP): $conexion"
-}
-
-# ─────────────────────────────────────────────────────────────
-# VERIFICAR HSTS EN UN HOST
-# FIX: función nueva; comprueba que la cabecera HSTS está
-#      presente en la respuesta HTTPS
-# ─────────────────────────────────────────────────────────────
-verificar_hsts() {
-    local nombre=$1 puerto=$2
-    local hsts
-    hsts=$(curl -sk --max-time 5 -I "https://127.0.0.1:$puerto" 2>/dev/null \
-           | grep -i "strict-transport-security" | tr -d '\r')
-    if [[ -n "$hsts" ]]; then
-        echo "  [$nombre] HSTS: ✔ ($hsts)"
-    else
-        echo "  [$nombre] HSTS: ✘ no encontrado"
-    fi
-}
-
-# ─────────────────────────────────────────────────────────────
-# RESUMEN AUTOMATIZADO
-# FIX: ahora itera SERVICIOS_VERIFICAR y llama verificar_http
-#      o verificar_ftp según el protocolo de cada servicio;
-#      además comprueba HSTS en cada entrada HTTPS
-# ─────────────────────────────────────────────────────────────
-verificar_resumen() {
-    echo ""
-    echo "=========================================================="
-    echo "         RESUMEN AUTOMATIZADO DE SERVICIOS               "
-    echo "=========================================================="
-
-    if [ ${#RESUMEN_INSTALACIONES[@]} -eq 0 ]; then
-        echo "  No se ha instalado ningún servicio en esta sesión."
-    else
-        echo ""
-        echo "── Servicios instalados en esta sesión ──────────────────"
-        for r in "${RESUMEN_INSTALACIONES[@]}"; do
-            echo "  -> $r"
-        done
-    fi
-
-    echo ""
-    echo "── Verificación activa de cada servicio ─────────────────"
-    if [ ${#SERVICIOS_VERIFICAR[@]} -eq 0 ]; then
-        echo "  (sin servicios registrados aún)"
-    else
-        for entrada in "${SERVICIOS_VERIFICAR[@]}"; do
-            # Formato: nombre|unit|puerto|proto
-            IFS='|' read -r nombre unit puerto proto <<< "$entrada"
-            case "$proto" in
-                http|https)
-                    verificar_http "$nombre" "$unit" "$puerto" "$proto"
-                    # FIX: verificar HSTS solo en entradas HTTPS
-                    if [[ "$proto" == "https" ]]; then
-                        verificar_hsts "$nombre" "$puerto"
-                    fi
-                    ;;
-                ftp|ftps)
-                    verificar_ftp "$nombre" "$unit" "$puerto"
-                    ;;
-            esac
-        done
-    fi
-
-    echo ""
-    echo "── Puertos activos en el sistema ────────────────────────"
-    ss -tlnp | awk 'NR>1 {print "  " $4}' | sort -u
-
-    echo "=========================================================="
-    echo ""
-}
-
-# ─────────────────────────────────────────────────────────────
-# CAMBIAR PUERTOS DE UN SERVICIO YA INSTALADO
-# ─────────────────────────────────────────────────────────────
-cambiar_puertos() {
-    echo ""
-    echo "=========================================================="
-    echo "         CAMBIAR PUERTOS DE SERVICIO                     "
-    echo "=========================================================="
-    echo " 1) Apache (httpd)"
-    echo " 2) Nginx"
-    echo " 3) Tomcat"
-    echo " 0) Regresar"
-    echo "=========================================================="
-    read -p "Selecciona el servicio: " srv < /dev/tty
-    [[ "$srv" == "0" ]] && return
-
-    read puerto_http puerto_https <<< $(pedir_puerto "servicio" 80 443)
-
-    case "$srv" in
-        1) cambiar_puertos_apache "$puerto_http" "$puerto_https" ;;
-        2) cambiar_puertos_nginx  "$puerto_http" "$puerto_https" ;;
-        3) cambiar_puertos_tomcat "$puerto_http" "$puerto_https" ;;
-        *) echo "Opción inválida." ;;
-    esac
-}
-
-cambiar_puertos_apache() {
-    local http=$1 https=$2
-    local conf="/etc/httpd/conf.d/reprobados_apache.conf"
-
-    if [[ ! -f "$conf" ]]; then
-        echo "Apache no está configurado. Instálalo primero." > /dev/tty
-        return 1
-    fi
-
-    local dir="/etc/ssl/apache"
-    # Detectar si SSL está activo
-    local ssl="N"
-    grep -q "SSLEngine" "$conf" && ssl="S"
-
-    echo "Actualizando configuración de Apache..." > /dev/tty
-    rm -f "$conf"
-
-    # Comentar Listen del httpd.conf principal
-    sed -i 's/^Listen 80$/#Listen 80/' /etc/httpd/conf/httpd.conf 2>/dev/null
-    sed -i 's/^Listen 443$/#Listen 443/' /etc/httpd/conf/httpd.conf 2>/dev/null
-
-    if [[ "$ssl" == "S" ]]; then
-        cat > "$conf" <<EOF
-Listen $http
-Listen $https
-
-<VirtualHost *:$http>
-    ServerName www.reprobados.com
-    Redirect permanent / https://www.reprobados.com:$https/
-</VirtualHost>
-
-<VirtualHost *:$https>
-    ServerName www.reprobados.com
-    DocumentRoot /var/www/apache
-    SSLEngine on
-    SSLCertificateFile    $dir/server.crt
-    SSLCertificateKeyFile $dir/server.key
-    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
-</VirtualHost>
-EOF
-    else
-        cat > "$conf" <<EOF
-Listen $http
-
-<VirtualHost *:$http>
-    ServerName www.reprobados.com
-    DocumentRoot /var/www/apache
-</VirtualHost>
-EOF
-    fi
-
-    abrir_puerto_firewall "$http"
-    abrir_puerto_firewall "$https"
-    semanage port -a -t http_port_t -p tcp "$http" > /dev/null 2>&1
-    semanage port -a -t http_port_t -p tcp "$https" > /dev/null 2>&1
-    recargar_firewall
-    systemctl restart httpd
-    echo "✔ Apache ahora escucha en HTTP:$http  HTTPS:$https" > /dev/tty
-}
-
-cambiar_puertos_nginx() {
-    local http=$1 https=$2
-    local conf="/etc/nginx/conf.d/reprobados_nginx.conf"
-
-    if [[ ! -f "$conf" ]]; then
-        echo "Nginx no está configurado. Instálalo primero." > /dev/tty
-        return 1
-    fi
-
-    local dir="/etc/ssl/nginx"
-    local ssl="N"
-    grep -q "ssl_certificate" "$conf" && ssl="S"
-
-    echo "Actualizando configuración de Nginx..." > /dev/tty
-    rm -f "$conf"
-
-    semanage port -a -t http_port_t -p tcp "$http" > /dev/null 2>&1
-    semanage port -a -t http_port_t -p tcp "$https" > /dev/null 2>&1
-
-    if [[ "$ssl" == "S" ]]; then
-        cat > "$conf" <<EOF
-server {
-    listen $http;
-    server_name www.reprobados.com;
-    return 301 https://\$host:$https\$request_uri;
-}
-
-server {
-    listen $https ssl;
-    server_name www.reprobados.com;
-    ssl_certificate     $dir/server.crt;
-    ssl_certificate_key $dir/server.key;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    root  /var/www/nginx;
-    index index.html;
-}
-EOF
-    else
-        cat > "$conf" <<EOF
-server {
-    listen $http;
-    server_name www.reprobados.com;
-    root  /var/www/nginx;
-    index index.html;
-}
-EOF
-    fi
-
-    abrir_puerto_firewall "$http"
-    abrir_puerto_firewall "$https"
-    recargar_firewall
-    systemctl restart nginx
-    echo "✔ Nginx ahora escucha en HTTP:$http  HTTPS:$https" > /dev/tty
-}
-
-cambiar_puertos_tomcat() {
-    local http=$1 https=$2
-    local server_xml="/etc/tomcat/server.xml"
-
-    if [[ ! -f "$server_xml" ]]; then
-        echo "Tomcat no está configurado. Instálalo primero." > /dev/tty
-        return 1
-    fi
-
-    local ssl="N"
-    grep -q "SSLEnabled" "$server_xml" && ssl="S"
-    local ks="/etc/ssl/tomcat/keystore.p12"
-
-    echo "Actualizando configuración de Tomcat..." > /dev/tty
-
-    semanage port -a -t http_port_t -p tcp "$http" > /dev/null 2>&1
-    semanage port -a -t http_port_t -p tcp "$https" > /dev/null 2>&1
-
-    if [[ "$ssl" == "S" ]]; then
-        cat > "$server_xml" <<EOF
-<Server port="8005" shutdown="SHUTDOWN">
-  <Service name="Catalina">
-    <Connector port="$http" protocol="HTTP/1.1"
-               connectionTimeout="20000"
-               redirectPort="$https" />
-    <Connector port="$https"
-               protocol="org.apache.coyote.http11.Http11NioProtocol"
-               maxThreads="150" SSLEnabled="true">
-      <SSLHostConfig>
-        <Certificate certificateKeystoreFile="$ks"
-                     type="RSA"
-                     certificateKeystorePassword="reprobados" />
-      </SSLHostConfig>
-    </Connector>
-    <Engine name="Catalina" defaultHost="localhost">
-      <Host name="localhost" appBase="webapps"
-            unpackWARs="true" autoDeploy="true" />
-    </Engine>
-  </Service>
-</Server>
-EOF
-    else
-        cat > "$server_xml" <<EOF
-<Server port="8005" shutdown="SHUTDOWN">
-  <Service name="Catalina">
-    <Connector port="$http" protocol="HTTP/1.1"
-               connectionTimeout="20000" />
-    <Engine name="Catalina" defaultHost="localhost">
-      <Host name="localhost" appBase="webapps"
-            unpackWARs="true" autoDeploy="true" />
-    </Engine>
-  </Service>
-</Server>
-EOF
-    fi
-
-    abrir_puerto_firewall "$http"
-    abrir_puerto_firewall "$https"
-    recargar_firewall
-    systemctl restart tomcat
-    echo "Esperando que Tomcat levante..." > /dev/tty
-    sleep 8
-    echo "✔ Tomcat ahora escucha en HTTP:$http  HTTPS:$https" > /dev/tty
-}
-
-
-# Descarga los RPMs con dnf download y genera sus SHA256
-# para que puedan instalarse desde el FTP local
-# ─────────────────────────────────────────────────────────────
-preparar_repositorio_ftp() {
-    local base="/srv/ftp/anon/http/Linux"
-    echo "" > /dev/tty
-    echo "=========================================================="  > /dev/tty
-    echo "         PREPARANDO REPOSITORIO FTP LOCAL                "  > /dev/tty
-    echo "=========================================================="  > /dev/tty
-    echo "Ruta base: $base"                                            > /dev/tty
-
-    # Crear estructura de directorios
-    mkdir -p "$base/Apache"
-    mkdir -p "$base/Nginx"
-    mkdir -p "$base/Tomcat"
-    mkdir -p "$base/vsftpd"
-
-    # ── Descargar RPMs ────────────────────────────────────────
-    echo "" > /dev/tty
-    echo "Descargando RPMs con dnf download..." > /dev/tty
-
-    echo "  → Apache (httpd)..." > /dev/tty
-    dnf download httpd mod_ssl --destdir "$base/Apache/" > /dev/null 2>&1
-
-    echo "  → Nginx..." > /dev/tty
-    dnf download nginx --destdir "$base/Nginx/" > /dev/null 2>&1
-
-    echo "  → Tomcat + Java..." > /dev/tty
-    # Intentar descarga directa
-    dnf download tomcat java-17-openjdk --destdir "$base/Tomcat/" > /dev/null 2>&1
-    # Si el directorio quedó vacío, forzar descarga instalando con --downloadonly
-    if [ -z "$(ls $base/Tomcat/*.rpm 2>/dev/null)" ]; then
-        dnf install -y tomcat java-17-openjdk --downloadonly \
-            --downloaddir="$base/Tomcat/" > /dev/null 2>&1
-    fi
-    # Último recurso: copiar del caché de dnf
-    if [ -z "$(ls $base/Tomcat/*.rpm 2>/dev/null)" ]; then
-        find /var/cache/dnf -name "tomcat*.rpm" 2>/dev/null \
-            | head -5 | xargs -I{} cp {} "$base/Tomcat/" 2>/dev/null
-        find /var/cache/dnf -name "java-17-openjdk-[0-9]*.rpm" 2>/dev/null \
-            | head -2 | xargs -I{} cp {} "$base/Tomcat/" 2>/dev/null
-    fi
-
-    echo "  → vsftpd..." > /dev/tty
-    dnf download vsftpd --destdir "$base/vsftpd/" > /dev/null 2>&1
-
-    # ── Generar SHA256 para cada RPM ──────────────────────────
-    echo "" > /dev/tty
-    echo "Generando archivos SHA256..." > /dev/tty
-    for servicio in Apache Nginx Tomcat vsftpd; do
-        for f in "$base/$servicio/"*.rpm; do
-            [[ -f "$f" ]] || continue
-            sha256sum "$f" | awk '{print $1}' > "${f}.sha256"
-            echo "  ✔ $(basename $f).sha256" > /dev/tty
-        done
-    done
-
-    # ── Permisos para acceso anónimo ─────────────────────────
-    chmod -R 755 /srv/ftp/anon/
-    chown -R nobody:nobody /srv/ftp/anon/ 2>/dev/null
-
-    echo "" > /dev/tty
-    echo "✔ Repositorio FTP listo en $base" > /dev/tty
-    echo "  Ahora puedes instalar los servicios usando la opción FTP" > /dev/tty
-    echo "  FTP_SERVER configurado: $FTP_SERVER" > /dev/tty
-    echo "" > /dev/tty
-
-    # Mostrar contenido generado
-    echo "── Archivos disponibles ─────────────────────────────────" > /dev/tty
-    find "$base" -name "*.rpm" | sort | while read f; do
-        echo "  $(basename $f)" > /dev/tty
-    done
-    echo "==========================================================" > /dev/tty
-}
-
-# ─────────────────────────────────────────────────────────────
-# PUNTO DE ENTRADA
-# ─────────────────────────────────────────────────────────────
-main
+# ------------------------------------------------------------
+# INICIO
+# ------------------------------------------------------------
+menu_principal
