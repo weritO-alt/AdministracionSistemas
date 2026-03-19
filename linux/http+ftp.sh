@@ -15,6 +15,8 @@ PAQUETE_DESCARGADO=""
 fuente=""
 activar_ssl=""
 archivo_a_instalar=""
+puerto_http=""
+puerto_https=""
 
 # ============================================================
 #  BLOQUE 1: UTILIDADES GENERALES
@@ -58,11 +60,13 @@ generar_ssl() {
 actualizar_index_visual() {
     local servidor=$1
     local ssl_status=$2
+    local p_http=${3:-80}
+    local p_https=${4:-443}
     local color="red"
     local msg="SITIO NO SEGURO (HTTP)"
-    local puerto="80"
+    local puerto="$p_http"
     if [[ "$ssl_status" == "S" ]]; then
-        color="green"; msg="SITIO SEGURO (HTTPS)"; puerto="443"
+        color="green"; msg="SITIO SEGURO (HTTPS)"; puerto="$p_https"
     fi
     sudo bash -c "cat > /var/www/html/index.html" <<EOF
 <html>
@@ -214,12 +218,12 @@ CONFEOF
         local dir
         dir=$(generar_ssl "apache")
         sudo bash -c "cat > /etc/httpd/conf.d/reprobados.conf" <<EOF
-<VirtualHost *:80>
+<VirtualHost *:${p_http}>
     ServerName www.reprobados.com
     Redirect permanent / https://www.reprobados.com/
 </VirtualHost>
 
-<VirtualHost *:443>
+<VirtualHost *:${p_https}>
     ServerName www.reprobados.com
     DocumentRoot /var/www/html
     SSLEngine on
@@ -227,10 +231,10 @@ CONFEOF
     SSLCertificateKeyFile $dir/server.key
 </VirtualHost>
 EOF
-        abrir_puerto_firewall 443
+        abrir_puerto_firewall "$p_https"
     else
         sudo bash -c "cat > /etc/httpd/conf.d/reprobados.conf" <<'EOF'
-<VirtualHost *:80>
+<VirtualHost *:${p_http}>
     ServerName www.reprobados.com
     DocumentRoot /var/www/html
 </VirtualHost>
@@ -240,12 +244,12 @@ EOF
     # SELinux: permitir que httpd sirva desde /var/www/html
     sudo setsebool -P httpd_read_user_content 1 > /dev/null 2>&1
 
-    abrir_puerto_firewall 80
+    abrir_puerto_firewall "$p_http"
     recargar_firewall
 
     sudo systemctl enable --now httpd
     sudo systemctl restart httpd
-    RESUMEN_INSTALACIONES+=("Apache (httpd) -> Completado (SSL: $ssl)")
+    RESUMEN_INSTALACIONES+=("Apache (httpd) -> Completado (SSL: $ssl | HTTP: $p_http | HTTPS: $p_https)")
 }
 
 instalar_nginx() {
@@ -266,13 +270,13 @@ instalar_nginx() {
         dir=$(generar_ssl "nginx")
         sudo bash -c "cat > /etc/nginx/conf.d/reprobados.conf" <<EOF
 server {
-    listen 80;
+    listen ${p_http};
     server_name www.reprobados.com;
     return 301 https://\$host\$request_uri;
 }
 
 server {
-    listen 443 ssl;
+    listen ${p_https} ssl;
     server_name www.reprobados.com;
     ssl_certificate     $dir/server.crt;
     ssl_certificate_key $dir/server.key;
@@ -280,11 +284,11 @@ server {
     index index.html;
 }
 EOF
-        abrir_puerto_firewall 443
+        abrir_puerto_firewall "$p_https"
     else
         sudo bash -c "cat > /etc/nginx/conf.d/reprobados.conf" <<'EOF'
 server {
-    listen 80;
+    listen ${p_http};
     server_name www.reprobados.com;
     root  /var/www/html;
     index index.html;
@@ -292,18 +296,20 @@ server {
 EOF
     fi
 
-    abrir_puerto_firewall 80
+    abrir_puerto_firewall "$p_http"
     recargar_firewall
 
     sudo systemctl enable --now nginx
     sudo systemctl restart nginx
-    RESUMEN_INSTALACIONES+=("Nginx -> Completado (SSL: $ssl)")
+    RESUMEN_INSTALACIONES+=("Nginx -> Completado (SSL: $ssl | HTTP: $p_http | HTTPS: $p_https)")
 }
 
 instalar_tomcat() {
     local archivo=$1
     local web_ftp=$2
     local ssl=$3
+    local p_http=${4:-80}
+    local p_https=${5:-443}
 
     liberar_puertos_web
     [[ "$web_ftp" == "FTP" ]] && descargar_y_validar_hash "Tomcat" "$archivo"
@@ -327,7 +333,7 @@ EOF
     sudo systemctl daemon-reload
 
     # Contenido de prueba
-    actualizar_index_visual "Tomcat" "$ssl"
+    actualizar_index_visual "Tomcat" "$ssl" "$p_http" "$p_https"
     sudo mkdir -p /var/lib/tomcat/webapps/ROOT
     sudo cp /var/www/html/index.html /var/lib/tomcat/webapps/ROOT/index.html
     sudo chown -R "$T_USER:$T_USER" /var/lib/tomcat/webapps/ROOT
@@ -347,8 +353,8 @@ EOF
         sudo bash -c "cat > /etc/tomcat/server.xml" <<EOF
 <Server port="8005" shutdown="SHUTDOWN">
   <Service name="Catalina">
-    <Connector port="80"  protocol="HTTP/1.1" connectionTimeout="20000" redirectPort="443" />
-    <Connector port="443" protocol="org.apache.coyote.http11.Http11NioProtocol"
+    <Connector port="${p_http}"  protocol="HTTP/1.1" connectionTimeout="20000" redirectPort="${p_https}" />
+    <Connector port="${p_https}" protocol="org.apache.coyote.http11.Http11NioProtocol"
                maxThreads="150" SSLEnabled="true">
       <SSLHostConfig>
         <Certificate certificateKeystoreFile="$ks"
@@ -362,12 +368,12 @@ EOF
   </Service>
 </Server>
 EOF
-        abrir_puerto_firewall 443
+        abrir_puerto_firewall "$p_https"
     else
         sudo bash -c 'cat > /etc/tomcat/server.xml' <<'EOF'
 <Server port="8005" shutdown="SHUTDOWN">
   <Service name="Catalina">
-    <Connector port="80" protocol="HTTP/1.1" connectionTimeout="20000" />
+    <Connector port="${p_http}" protocol="HTTP/1.1" connectionTimeout="20000" />
     <Engine name="Catalina" defaultHost="localhost">
       <Host name="localhost" appBase="webapps" unpackWARs="true" autoDeploy="true" />
     </Engine>
@@ -376,14 +382,14 @@ EOF
 EOF
     fi
 
-    abrir_puerto_firewall 80
+    abrir_puerto_firewall "$p_http"
     recargar_firewall
 
     sudo systemctl enable --now tomcat
     sudo systemctl restart tomcat
     echo "Esperando que Tomcat levante (10s)..."
     sleep 10
-    RESUMEN_INSTALACIONES+=("Tomcat -> Completado (SSL: $ssl)")
+    RESUMEN_INSTALACIONES+=("Tomcat -> Completado (SSL: $ssl | HTTP: $p_http | HTTPS: $p_https)")
 }
 
 instalar_vsftpd() {
@@ -441,7 +447,7 @@ EOF
         sudo bash -c 'cat >> /etc/vsftpd/vsftpd.conf' <<'EOF'
 
 # Túnel FTPS implícito
-listen_port=990
+listen_port=${p_ftps}
 implicit_ssl=YES
 ssl_enable=YES
 allow_anon_ssl=NO
@@ -455,7 +461,7 @@ ssl_ciphers=HIGH
 rsa_cert_file=/etc/vsftpd/ssl/vsftpd.crt
 rsa_private_key_file=/etc/vsftpd/ssl/vsftpd.key
 EOF
-        abrir_puerto_firewall 990
+        abrir_puerto_firewall "$p_ftps"
     else
         sudo bash -c 'cat >> /etc/vsftpd/vsftpd.conf' <<'EOF'
 
@@ -473,13 +479,13 @@ EOF
     sudo setsebool -P ftp_home_dir    1       > /dev/null 2>&1
 
     abrir_puerto_firewall 20
-    abrir_puerto_firewall 21
+    abrir_puerto_firewall "$p_ftp"
     abrir_puerto_firewall "40000-50000"
     recargar_firewall
 
     sudo systemctl enable --now vsftpd
     sudo systemctl restart vsftpd
-    RESUMEN_INSTALACIONES+=("vsftpd -> Completado (SSL: $ssl)")
+    RESUMEN_INSTALACIONES+=("vsftpd -> Completado (SSL: $ssl | FTP: $p_ftp | FTPS: $p_ftps)")
 }
 
 # ============================================================
@@ -527,6 +533,18 @@ preguntar_fuente_y_ssl() {
     echo ""
     read -r -p "¿Activar SSL en este servicio? [S/N]: " activar_ssl
     activar_ssl=$(echo "$activar_ssl" | tr '[:lower:]' '[:upper:]')
+
+    echo ""
+    read -r -p "Puerto HTTP  [default: 80 ]: " puerto_http
+    [[ -z "$puerto_http" ]] && puerto_http="80"
+
+    if [[ "$activar_ssl" == "S" ]]; then
+        read -r -p "Puerto HTTPS [default: 443]: " puerto_https
+        [[ -z "$puerto_https" ]] && puerto_https="443"
+    fi
+
+    echo "  -> Puerto HTTP : $puerto_http"
+    [[ "$activar_ssl" == "S" ]] && echo "  -> Puerto HTTPS: $puerto_https"
     return 0
 }
 
@@ -556,19 +574,20 @@ while true; do
     case $opcion in
         1)
             preguntar_fuente_y_ssl "Apache"
-            [[ $? -eq 0 ]] && instalar_apache "$archivo_a_instalar" "$fuente" "$activar_ssl"
+            [[ $? -eq 0 ]] && instalar_apache "$archivo_a_instalar" "$fuente" "$activar_ssl" "$puerto_http" "$puerto_https"
             ;;
         2)
             preguntar_fuente_y_ssl "Nginx"
-            [[ $? -eq 0 ]] && instalar_nginx "$archivo_a_instalar" "$fuente" "$activar_ssl"
+            [[ $? -eq 0 ]] && instalar_nginx "$archivo_a_instalar" "$fuente" "$activar_ssl" "$puerto_http" "$puerto_https"
             ;;
         3)
             preguntar_fuente_y_ssl "Tomcat"
-            [[ $? -eq 0 ]] && instalar_tomcat "$archivo_a_instalar" "$fuente" "$activar_ssl"
+            [[ $? -eq 0 ]] && instalar_tomcat "$archivo_a_instalar" "$fuente" "$activar_ssl" "$puerto_http" "$puerto_https"
             ;;
         4)
             preguntar_fuente_y_ssl "vsftpd"
-            [[ $? -eq 0 ]] && instalar_vsftpd "$archivo_a_instalar" "$fuente" "$activar_ssl"
+            [[ $? -eq 0 ]] && instalar_vsftpd "$archivo_a_instalar" "$fuente" "$activar_ssl" "$puerto_http" "$puerto_https"
+            # Nota: para vsftpd puerto_http=FTP(21) y puerto_https=FTPS(990)
             ;;
         5)
             mostrar_resumen_final
