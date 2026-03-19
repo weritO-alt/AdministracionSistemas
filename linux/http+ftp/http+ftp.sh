@@ -15,7 +15,7 @@
 FTP_SERVER="192.168.56.130"
 FTP_USER="anonymous"
 FTP_PASS=""
-FTP_BASE="anon/http/Linux"
+FTP_BASE="http/Linux"
 RESUMEN_INSTALACIONES=()
 
 # Formato de cada entrada: "nombre|systemd_unit|puerto|proto"
@@ -886,13 +886,19 @@ preparar_repositorio_ftp() {
     dnf download nginx --destdir "$base/Nginx/" > /dev/null 2>&1
 
     echo "  → Tomcat + Java..." > /dev/tty
+    # Intentar descarga directa
     dnf download tomcat java-17-openjdk --destdir "$base/Tomcat/" > /dev/null 2>&1
-    # Fedora 43 puede llamarlo tomcat o tomcat10, intentamos ambos
-    dnf download tomcat10 --destdir "$base/Tomcat/" > /dev/null 2>&1
-    # Si sigue vacío, copiamos el RPM ya instalado del caché de dnf
+    # Si el directorio quedó vacío, forzar descarga instalando con --downloadonly
     if [ -z "$(ls $base/Tomcat/*.rpm 2>/dev/null)" ]; then
-        find /var/cache/dnf -name "tomcat*.rpm" -exec cp {} "$base/Tomcat/" \; 2>/dev/null
-        find /var/cache/dnf -name "java-17*.rpm" -exec cp {} "$base/Tomcat/" \; 2>/dev/null
+        dnf install -y tomcat java-17-openjdk --downloadonly \
+            --downloaddir="$base/Tomcat/" > /dev/null 2>&1
+    fi
+    # Último recurso: copiar del caché de dnf
+    if [ -z "$(ls $base/Tomcat/*.rpm 2>/dev/null)" ]; then
+        find /var/cache/dnf -name "tomcat*.rpm" 2>/dev/null \
+            | head -5 | xargs -I{} cp {} "$base/Tomcat/" 2>/dev/null
+        find /var/cache/dnf -name "java-17-openjdk-[0-9]*.rpm" 2>/dev/null \
+            | head -2 | xargs -I{} cp {} "$base/Tomcat/" 2>/dev/null
     fi
 
     echo "  → vsftpd..." > /dev/tty
