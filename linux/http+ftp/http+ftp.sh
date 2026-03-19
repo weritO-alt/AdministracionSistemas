@@ -4,13 +4,22 @@
 #   PRÁCTICA 7 - Orquestador de Instalación con SSL/TLS
 #   Sistema: Fedora Server
 #   Servicios: httpd (Apache), Nginx, Tomcat, vsftpd
-#   Los puertos se eligen al momento de instalar cada servicio
+#   Correcciones aplicadas:
+#     - verificar_resumen() llama verificar_http() por cada servicio
+#     - HSTS (Strict-Transport-Security) en Apache y Nginx
+#     - Tomcat: web.xml con security-constraint para redirect real
+#     - Hash: soporta SHA256 y MD5 como fallback
+#     - Array SERVICIOS_VERIFICAR para rastrear puertos y protocolos
 # =============================================================
 
 FTP_SERVER="192.168.56.104"
 FTP_USER="chofis"
 FTP_PASS="3006"
 RESUMEN_INSTALACIONES=()
+
+# Formato de cada entrada: "nombre|systemd_unit|puerto|proto"
+# proto = http | https | ftp | ftps
+SERVICIOS_VERIFICAR=()
 
 # ─────────────────────────────────────────────────────────────
 # MENÚ PRINCIPAL
@@ -79,16 +88,11 @@ main() {
 
 # ─────────────────────────────────────────────────────────────
 # PEDIR PUERTO AL USUARIO
-# Uso: read http https <<< $(pedir_puerto "Apache" 80 443)
-#   $1 = nombre del servicio
-#   $2 = puerto HTTP sugerido por default
-#   $3 = puerto HTTPS sugerido por default
 # Devuelve "HTTP_PORT HTTPS_PORT" separados por espacio
 # ─────────────────────────────────────────────────────────────
 pedir_puerto() {
     local nombre=$1 default_http=$2 default_https=$3
 
-    # ── Puerto HTTP ───────────────────────────────────────────
     local puerto_http
     while true; do
         read -p "  Puerto HTTP para $nombre [Enter = $default_http]: " puerto_http < /dev/tty
@@ -100,7 +104,6 @@ pedir_puerto() {
         echo "  Puerto inválido. Ingresa un número entre 1 y 65535." > /dev/tty
     done
 
-    # ── Puerto HTTPS ──────────────────────────────────────────
     local puerto_https
     while true; do
         read -p "  Puerto HTTPS para $nombre [Enter = $default_https]: " puerto_https < /dev/tty
@@ -116,7 +119,6 @@ pedir_puerto() {
         echo "  Puerto inválido. Ingresa un número entre 1 y 65535." > /dev/tty
     done
 
-    # Avisar si algún puerto ya está ocupado
     for p in "$puerto_http" "$puerto_https"; do
         if ss -tlnp | grep -q ":$p "; then
             echo "  ⚠ ADVERTENCIA: el puerto $p ya está en uso." > /dev/tty
@@ -163,7 +165,9 @@ listar_versiones_ftp() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# DESCARGA Y VALIDACIÓN SHA256
+# DESCARGA Y VALIDACIÓN DE INTEGRIDAD (SHA256 con fallback MD5)
+# FIX: ahora intenta SHA256 primero; si no existe, intenta MD5;
+#      si tampoco existe, advierte y continúa.
 # ─────────────────────────────────────────────────────────────
 descargar_y_validar_hash() {
     local servicio=$1 archivo=$2
@@ -173,27 +177,52 @@ descargar_y_validar_hash() {
     cd /tmp || exit 1
 
     curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}"
-    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.sha256"
 
     if [[ ! -f "$archivo" ]]; then
         echo "ERROR: No se pudo descargar $archivo." > /dev/tty
         return 1
     fi
 
-    if [[ -f "${archivo}.sha256" ]]; then
+    # ── Intentar SHA256 ───────────────────────────────────────
+    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.sha256" 2>/dev/null
+
+    if [[ -s "${archivo}.sha256" ]]; then
         local hash_remoto hash_local
         hash_remoto=$(awk '{print $1}' "${archivo}.sha256")
         hash_local=$(sha256sum "$archivo" | awk '{print $1}')
-        if [ "$hash_remoto" == "$hash_local" ]; then
+        if [ "$hash_remoto" = "$hash_local" ]; then
             echo "✔ Integridad SHA256 verificada." > /dev/tty
+            rm -f "${archivo}.sha256"
+            return 0
         else
-            echo "✘ ERROR DE INTEGRIDAD: Hash no coincide. Abortando." > /dev/tty
+            echo "✘ ERROR DE INTEGRIDAD SHA256: Hash no coincide. Abortando." > /dev/tty
             rm -f "$archivo" "${archivo}.sha256"
             return 1
         fi
-    else
-        echo "ADVERTENCIA: Sin .sha256, se omite validación." > /dev/tty
     fi
+
+    # ── Fallback MD5 ──────────────────────────────────────────
+    rm -f "${archivo}.sha256"
+    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.md5" 2>/dev/null
+
+    if [[ -s "${archivo}.md5" ]]; then
+        local hash_remoto hash_local
+        hash_remoto=$(awk '{print $1}' "${archivo}.md5")
+        hash_local=$(md5sum "$archivo" | awk '{print $1}')
+        if [ "$hash_remoto" = "$hash_local" ]; then
+            echo "✔ Integridad MD5 verificada." > /dev/tty
+            rm -f "${archivo}.md5"
+            return 0
+        else
+            echo "✘ ERROR DE INTEGRIDAD MD5: Hash no coincide. Abortando." > /dev/tty
+            rm -f "$archivo" "${archivo}.md5"
+            return 1
+        fi
+    fi
+
+    # ── Sin hash disponible ───────────────────────────────────
+    rm -f "${archivo}.md5"
+    echo "⚠ ADVERTENCIA: No se encontró archivo .sha256 ni .md5. Se omite validación." > /dev/tty
     return 0
 }
 
@@ -290,6 +319,7 @@ recargar_firewall() {
 
 # ─────────────────────────────────────────────────────────────
 # APACHE
+# FIX: añade HSTS en el VirtualHost HTTPS
 # ─────────────────────────────────────────────────────────────
 instalar_apache() {
     local archivo=$1 web_ftp=$2 ssl=$3
@@ -332,12 +362,16 @@ Listen $puerto_https
     ServerName www.reprobados.com
     DocumentRoot $docroot
     SSLEngine on
-    SSLCertificateFile $dir/server.crt
+    SSLCertificateFile    $dir/server.crt
     SSLCertificateKeyFile $dir/server.key
+    # FIX: HSTS - fuerza HTTPS durante 1 año en el navegador
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
 </VirtualHost>
 EOF
         abrir_puerto_firewall "$puerto_http"
         abrir_puerto_firewall "$puerto_https"
+        SERVICIOS_VERIFICAR+=("Apache|httpd|$puerto_http|http")
+        SERVICIOS_VERIFICAR+=("Apache-SSL|httpd|$puerto_https|https")
     else
         cat > "$conf_dir/reprobados_apache.conf" <<EOF
 Listen $puerto_http
@@ -348,6 +382,7 @@ Listen $puerto_http
 </VirtualHost>
 EOF
         abrir_puerto_firewall "$puerto_http"
+        SERVICIOS_VERIFICAR+=("Apache|httpd|$puerto_http|http")
     fi
 
     setsebool -P httpd_can_network_connect 1 > /dev/null 2>&1
@@ -361,6 +396,7 @@ EOF
 
 # ─────────────────────────────────────────────────────────────
 # NGINX
+# FIX: añade HSTS en el bloque server SSL
 # ─────────────────────────────────────────────────────────────
 instalar_nginx() {
     local archivo=$1 web_ftp=$2 ssl=$3
@@ -385,7 +421,6 @@ instalar_nginx() {
     crear_index "Nginx" "$ssl" "$puerto_display" "$docroot"
     chcon -R -t httpd_sys_content_t "$docroot" > /dev/null 2>&1
 
-    # nginx.conf limpio sin server{} inline
     cat > /etc/nginx/nginx.conf <<'NGINXEOF'
 user nginx;
 worker_processes auto;
@@ -401,8 +436,8 @@ http {
                       '$status $body_bytes_sent "$http_referer" '
                       '"$http_user_agent"';
     access_log  /var/log/nginx/access.log  main;
-    sendfile    on;
-    tcp_nopush  on;
+    sendfile        on;
+    tcp_nopush      on;
     keepalive_timeout 65;
     include     /etc/nginx/mime.types;
     default_type application/octet-stream;
@@ -414,6 +449,7 @@ NGINXEOF
 
     if [[ "$ssl" == "S" ]]; then
         local dir; dir=$(generar_ssl "nginx")
+        # FIX: add_header HSTS en el bloque SSL
         cat > "$conf_dir/reprobados_nginx.conf" <<EOF
 server {
     listen $puerto_http;
@@ -426,12 +462,16 @@ server {
     server_name www.reprobados.com;
     ssl_certificate     $dir/server.crt;
     ssl_certificate_key $dir/server.key;
+    # FIX: HSTS - fuerza HTTPS durante 1 año en el navegador
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     root  $docroot;
     index index.html;
 }
 EOF
         abrir_puerto_firewall "$puerto_http"
         abrir_puerto_firewall "$puerto_https"
+        SERVICIOS_VERIFICAR+=("Nginx|nginx|$puerto_http|http")
+        SERVICIOS_VERIFICAR+=("Nginx-SSL|nginx|$puerto_https|https")
     else
         cat > "$conf_dir/reprobados_nginx.conf" <<EOF
 server {
@@ -442,6 +482,7 @@ server {
 }
 EOF
         abrir_puerto_firewall "$puerto_http"
+        SERVICIOS_VERIFICAR+=("Nginx|nginx|$puerto_http|http")
     fi
 
     setsebool -P httpd_can_network_connect 1 > /dev/null 2>&1
@@ -455,6 +496,8 @@ EOF
 
 # ─────────────────────────────────────────────────────────────
 # TOMCAT
+# FIX: genera web.xml con security-constraint CONFIDENTIAL
+#      para que Tomcat fuerce la redirección HTTP→HTTPS de verdad
 # ─────────────────────────────────────────────────────────────
 instalar_tomcat() {
     local archivo=$1 web_ftp=$2 ssl=$3
@@ -512,8 +555,39 @@ instalar_tomcat() {
   </Service>
 </Server>
 EOF
+
+        # FIX: web.xml con security-constraint CONFIDENTIAL
+        # Esto hace que Tomcat redirija REALMENTE el tráfico HTTP al puerto HTTPS
+        # (redirectPort en server.xml solo funciona si existe esta restricción)
+        mkdir -p "$docroot/WEB-INF"
+        cat > "$docroot/WEB-INF/web.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="https://jakarta.ee/xml/ns/jakartaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee
+                             https://jakarta.ee/xml/ns/jakartaee/web-app_5_0.xsd"
+         version="5.0">
+
+  <!-- FIX: Forzar HTTPS en todos los recursos -->
+  <security-constraint>
+    <web-resource-collection>
+      <web-resource-name>Forzar HTTPS</web-resource-name>
+      <url-pattern>/*</url-pattern>
+    </web-resource-collection>
+    <user-data-constraint>
+      <!-- CONFIDENTIAL le dice a Tomcat que use el redirectPort (HTTPS) -->
+      <transport-guarantee>CONFIDENTIAL</transport-guarantee>
+    </user-data-constraint>
+  </security-constraint>
+
+</web-app>
+EOF
+        chown -R "$T_USER:$T_USER" "$docroot/WEB-INF"
+
         abrir_puerto_firewall "$puerto_http"
         abrir_puerto_firewall "$puerto_https"
+        SERVICIOS_VERIFICAR+=("Tomcat|tomcat|$puerto_http|http")
+        SERVICIOS_VERIFICAR+=("Tomcat-SSL|tomcat|$puerto_https|https")
     else
         cat > /etc/tomcat/server.xml <<EOF
 <Server port="8005" shutdown="SHUTDOWN">
@@ -528,6 +602,7 @@ EOF
 </Server>
 EOF
         abrir_puerto_firewall "$puerto_http"
+        SERVICIOS_VERIFICAR+=("Tomcat|tomcat|$puerto_http|http")
     fi
 
     recargar_firewall
@@ -541,7 +616,7 @@ EOF
 }
 
 # ─────────────────────────────────────────────────────────────
-# VSFTPD (puertos fijos 21/990)
+# VSFTPD (puertos fijos 21 / 990)
 # ─────────────────────────────────────────────────────────────
 instalar_vsftpd() {
     local archivo=$1 web_ftp=$2 ssl=$3
@@ -610,6 +685,7 @@ rsa_cert_file=/etc/vsftpd/ssl/vsftpd.crt
 rsa_private_key_file=/etc/vsftpd/ssl/vsftpd.key
 EOF
         abrir_puerto_firewall 990
+        SERVICIOS_VERIFICAR+=("vsftpd-FTPS|vsftpd|990|ftps")
     else
         cat >> /etc/vsftpd/vsftpd.conf <<EOF
 
@@ -620,6 +696,7 @@ anon_mkdir_write_enable=NO
 anon_other_write_enable=NO
 EOF
         abrir_puerto_firewall 21
+        SERVICIOS_VERIFICAR+=("vsftpd|vsftpd|21|ftp")
     fi
 
     abrir_puerto_firewall 20
@@ -634,21 +711,67 @@ EOF
 }
 
 # ─────────────────────────────────────────────────────────────
-# VERIFICACIÓN ACTIVA Y RESUMEN
+# VERIFICACIÓN ACTIVA DE UN SERVICIO HTTP/HTTPS
+# FIX: función existente, sin cambios (ya estaba bien)
 # ─────────────────────────────────────────────────────────────
 verificar_http() {
     local nombre=$1 servicio=$2 puerto=$3 proto=$4
     local estado="INACTIVO"
     systemctl is-active --quiet "$servicio" 2>/dev/null && estado="ACTIVO"
-    local resp
+
+    local resp="N/A"
     if [[ "$proto" == "https" ]]; then
-        resp=$(curl -sk --max-time 5 "https://127.0.0.1:$puerto" -o /dev/null -w "%{http_code}")
-    else
-        resp=$(curl -s  --max-time 5 "http://127.0.0.1:$puerto"  -o /dev/null -w "%{http_code}")
+        resp=$(curl -sk --max-time 5 "https://127.0.0.1:$puerto" \
+               -o /dev/null -w "%{http_code}" 2>/dev/null)
+    elif [[ "$proto" == "http" ]]; then
+        resp=$(curl -s  --max-time 5 "http://127.0.0.1:$puerto" \
+               -o /dev/null -w "%{http_code}" 2>/dev/null)
     fi
+
     echo "  [$nombre] Proceso: $estado | Puerto $puerto ($proto): HTTP $resp"
 }
 
+# ─────────────────────────────────────────────────────────────
+# VERIFICACIÓN ACTIVA DE UN SERVICIO FTP/FTPS
+# FIX: función nueva; usa nc para comprobar que el puerto
+#      está abierto y acepta conexiones TCP
+# ─────────────────────────────────────────────────────────────
+verificar_ftp() {
+    local nombre=$1 servicio=$2 puerto=$3
+    local estado="INACTIVO"
+    systemctl is-active --quiet "$servicio" 2>/dev/null && estado="ACTIVO"
+
+    local conexion="CERRADO"
+    if nc -z -w3 127.0.0.1 "$puerto" 2>/dev/null; then
+        conexion="ABIERTO"
+    fi
+
+    echo "  [$nombre] Proceso: $estado | Puerto $puerto (TCP): $conexion"
+}
+
+# ─────────────────────────────────────────────────────────────
+# VERIFICAR HSTS EN UN HOST
+# FIX: función nueva; comprueba que la cabecera HSTS está
+#      presente en la respuesta HTTPS
+# ─────────────────────────────────────────────────────────────
+verificar_hsts() {
+    local nombre=$1 puerto=$2
+    local hsts
+    hsts=$(curl -sk --max-time 5 -I "https://127.0.0.1:$puerto" 2>/dev/null \
+           | grep -i "strict-transport-security" | tr -d '\r')
+    if [[ -n "$hsts" ]]; then
+        echo "  [$nombre] HSTS: ✔ ($hsts)"
+    else
+        echo "  [$nombre] HSTS: ✘ no encontrado"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# RESUMEN AUTOMATIZADO
+# FIX: ahora itera SERVICIOS_VERIFICAR y llama verificar_http
+#      o verificar_ftp según el protocolo de cada servicio;
+#      además comprueba HSTS en cada entrada HTTPS
+# ─────────────────────────────────────────────────────────────
 verificar_resumen() {
     echo ""
     echo "=========================================================="
@@ -658,14 +781,40 @@ verificar_resumen() {
     if [ ${#RESUMEN_INSTALACIONES[@]} -eq 0 ]; then
         echo "  No se ha instalado ningún servicio en esta sesión."
     else
+        echo ""
+        echo "── Servicios instalados en esta sesión ──────────────────"
         for r in "${RESUMEN_INSTALACIONES[@]}"; do
             echo "  -> $r"
         done
     fi
 
     echo ""
+    echo "── Verificación activa de cada servicio ─────────────────"
+    if [ ${#SERVICIOS_VERIFICAR[@]} -eq 0 ]; then
+        echo "  (sin servicios registrados aún)"
+    else
+        for entrada in "${SERVICIOS_VERIFICAR[@]}"; do
+            # Formato: nombre|unit|puerto|proto
+            IFS='|' read -r nombre unit puerto proto <<< "$entrada"
+            case "$proto" in
+                http|https)
+                    verificar_http "$nombre" "$unit" "$puerto" "$proto"
+                    # FIX: verificar HSTS solo en entradas HTTPS
+                    if [[ "$proto" == "https" ]]; then
+                        verificar_hsts "$nombre" "$puerto"
+                    fi
+                    ;;
+                ftp|ftps)
+                    verificar_ftp "$nombre" "$unit" "$puerto"
+                    ;;
+            esac
+        done
+    fi
+
+    echo ""
     echo "── Puertos activos en el sistema ────────────────────────"
     ss -tlnp | awk 'NR>1 {print "  " $4}' | sort -u
+
     echo "=========================================================="
     echo ""
 }
