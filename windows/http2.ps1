@@ -2,7 +2,7 @@
 #   PRACTICA 7 - Orquestador de Instalacion con SSL/TLS
 #   Sistema: Windows Server 2019
 #   Servicios WEB : IIS, Apache, Nginx
-#   FTP           : Servidor vsftpd en Fedora (192.168.114.129)
+#   FTP           : vsftpd en Fedora (FTPS explicito puerto 21)
 #
 #   Ejecutar como Administrador:
 #   powershell -ExecutionPolicy Bypass -File practica7_windows.ps1
@@ -12,7 +12,6 @@
 
 # -------------------------------------------------------------
 # VARIABLES GLOBALES
-# FTP: apunta al servidor vsftpd de Fedora
 # -------------------------------------------------------------
 $FTP_SERVER = "192.168.114.129"   # IP de Fedora
 $FTP_USER   = "repositorio"
@@ -25,7 +24,7 @@ $NGINX_DIR  = "$BASE_DIR\Nginx"
 $SSL_DIR    = "$BASE_DIR\SSL"
 
 $script:RESUMEN_INSTALACIONES = @()
-$script:SERVICIOS_VERIFICAR   = @()   # "nombre|servicio|puerto|proto"
+$script:SERVICIOS_VERIFICAR   = @()
 
 # -------------------------------------------------------------
 # MENU PRINCIPAL
@@ -54,7 +53,7 @@ function Main {
         Write-Host ""
         Write-Host "De donde deseas instalar?"
         Write-Host " 1) WEB (descarga directa desde Internet)"
-        Write-Host " 2) FTP (repositorio Fedora: $FTP_SERVER)"
+        Write-Host " 2) FTP (repositorio Fedora: $FTP_SERVER con FTPS)"
         Write-Host " 0) Regresar"
         $origen = Read-Host "Selecciona origen"
         if ($origen -eq "0") { continue }
@@ -124,7 +123,6 @@ function Preguntar-SSL {
 
 # -------------------------------------------------------------
 # CERTIFICADO AUTOFIRMADO
-# Usa openssl si esta disponible, si no usa PowerShell nativo
 # -------------------------------------------------------------
 function Generar-SSL {
     param($Servicio)
@@ -149,13 +147,8 @@ function Generar-SSL {
         $pwd_sec = ConvertTo-SecureString -String "reprobados" -Force -AsPlainText
         Export-PfxCertificate -Cert $cert -FilePath "$cert_dir\server.pfx" -Password $pwd_sec | Out-Null
         Export-Certificate    -Cert $cert -FilePath "$cert_dir\server.crt" -Type CERT | Out-Null
-
-        # Exportar clave privada a PEM usando openssl del sistema si existe
-        Write-Host "  OK Certificado PFX generado en $cert_dir (pass: reprobados)" -ForegroundColor Green
-        Write-Host "  Thumbprint: $($cert.Thumbprint)"
-
-        # Guardar thumbprint para IIS
         $cert.Thumbprint | Set-Content "$cert_dir\thumbprint.txt"
+        Write-Host "  OK Certificado PFX generado en $cert_dir (pass: reprobados)" -ForegroundColor Green
     }
     return $cert_dir
 }
@@ -197,66 +190,32 @@ function Abrir-Puerto-Firewall {
 }
 
 # -------------------------------------------------------------
-# NAVEGACION FTP - Fedora
-# Intenta FTP plano (puerto 21), ya que vsftpd en Fedora
-# esta configurado en modo activo sin SSL implicito
+# NAVEGACION FTP - Fedora (FTPS explicito puerto 21)
+# Usa curl.exe con --ssl-reqd --insecure
 # -------------------------------------------------------------
 function Listar-Versiones-FTP {
     param($Servicio)
     $url = "ftp://${FTP_SERVER}/${FTP_BASE}/${Servicio}/"
     Write-Host ""
-    Write-Host "Conectando al FTP de Fedora ($FTP_SERVER)..." -ForegroundColor Cyan
+    Write-Host "Conectando al FTP de Fedora ($FTP_SERVER) con FTPS..." -ForegroundColor Cyan
     Write-Host "Buscando instaladores en /$FTP_BASE/$Servicio/ ..."
 
-    # Intentar FTP plano primero (modo activo)
-    $versiones = @()
-    try {
-        $req = [System.Net.FtpWebRequest]::Create($url)
-        $req.Method      = [System.Net.WebRequestMethods+Ftp]::ListDirectory
-        $req.Credentials = New-Object System.Net.NetworkCredential($FTP_USER, $FTP_PASS)
-        $req.EnableSsl   = $false
-        $req.KeepAlive   = $false
-        $req.UsePassive  = $false   # Modo activo como curl -P -
+    $raw = & curl.exe -s -l --ssl-reqd --insecure -u "${FTP_USER}:${FTP_PASS}" $url 2>&1
 
-        $resp    = $req.GetResponse()
-        $reader  = New-Object System.IO.StreamReader($resp.GetResponseStream())
-        $contenido = $reader.ReadToEnd()
-        $reader.Close(); $resp.Close()
-
-        $versiones = $contenido -split "`n" |
-            ForEach-Object { $_.Trim() } |
-            Where-Object { $_ -ne "" -and $_ -notmatch '\.(sha256|md5)$' }
-    } catch {
-        Write-Host "  Modo activo fallo, intentando pasivo..." -ForegroundColor Yellow
-        try {
-            $req2 = [System.Net.FtpWebRequest]::Create($url)
-            $req2.Method      = [System.Net.WebRequestMethods+Ftp]::ListDirectory
-            $req2.Credentials = New-Object System.Net.NetworkCredential($FTP_USER, $FTP_PASS)
-            $req2.EnableSsl   = $false
-            $req2.KeepAlive   = $false
-            $req2.UsePassive  = $true
-
-            $resp2   = $req2.GetResponse()
-            $reader2 = New-Object System.IO.StreamReader($resp2.GetResponseStream())
-            $contenido2 = $reader2.ReadToEnd()
-            $reader2.Close(); $resp2.Close()
-
-            $versiones = $contenido2 -split "`n" |
-                ForEach-Object { $_.Trim() } |
-                Where-Object { $_ -ne "" -and $_ -notmatch '\.(sha256|md5)$' }
-        } catch {
-            Write-Host "  ERROR: No se pudo conectar al FTP de Fedora." -ForegroundColor Red
-            Write-Host "  Verifica que vsftpd este corriendo en $FTP_SERVER" -ForegroundColor Yellow
-            Write-Host "  Error: $_" -ForegroundColor Red
-            return "INVALIDO"
-        }
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+        Write-Host "  ERROR: No se pudo listar el FTP." -ForegroundColor Red
+        Write-Host "  Verifica que vsftpd este corriendo en Fedora con FTPS." -ForegroundColor Yellow
+        return "INVALIDO"
     }
 
+    $versiones = $raw -split "`n" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne "" -and $_ -notmatch '\.(sha256|md5)$' }
+
     if ($versiones.Count -eq 0) {
-        Write-Host "No se encontraron archivos .zip en /$FTP_BASE/$Servicio/" -ForegroundColor Red
-        Write-Host "Ejecuta en Fedora:" -ForegroundColor Yellow
-        Write-Host "  sudo mkdir -p /srv/ftp/Linux/Windows/$Servicio" -ForegroundColor Yellow
-        Write-Host "  sudo curl -L <url_zip> -o /srv/ftp/Linux/Windows/$Servicio/archivo.zip" -ForegroundColor Yellow
+        Write-Host "  No se encontraron archivos en /$FTP_BASE/$Servicio/" -ForegroundColor Red
+        Write-Host "  Ejecuta en Fedora:" -ForegroundColor Yellow
+        Write-Host "    sudo mkdir -p /srv/ftp/$FTP_BASE/$Servicio" -ForegroundColor Yellow
         return "INVALIDO"
     }
 
@@ -276,84 +235,61 @@ function Listar-Versiones-FTP {
 
 # -------------------------------------------------------------
 # DESCARGA DESDE FTP DE FEDORA + VALIDACION SHA256
+# Usa curl.exe con --ssl-reqd --insecure (FTPS explicito)
 # -------------------------------------------------------------
 function Descargar-Y-Validar {
     param($Servicio, $Archivo)
     $url_base = "ftp://${FTP_SERVER}/${FTP_BASE}/${Servicio}/"
     $destino  = "$env:TEMP\$Archivo"
 
-    Write-Host "Descargando $Archivo desde FTP de Fedora..." -ForegroundColor Cyan
+    Write-Host "Descargando $Archivo desde FTP de Fedora (FTPS)..." -ForegroundColor Cyan
 
-    # Usar curl.exe que ya maneja modo activo correctamente
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-    if ($curl) {
-        & curl.exe -s -P - -u "${FTP_USER}:${FTP_PASS}" "${url_base}${Archivo}" -o $destino
-    } else {
-        $wc = New-Object System.Net.WebClient
-        $wc.Credentials = New-Object System.Net.NetworkCredential($FTP_USER, $FTP_PASS)
-        try { $wc.DownloadFile("${url_base}${Archivo}", $destino) }
-        catch { Write-Host "ERROR: No se pudo descargar $Archivo." -ForegroundColor Red; return $false }
-    }
+    & curl.exe -s --ssl-reqd --insecure -u "${FTP_USER}:${FTP_PASS}" "${url_base}${Archivo}" -o $destino
 
     if (-not (Test-Path $destino) -or (Get-Item $destino).Length -eq 0) {
-        Write-Host "ERROR: Descarga fallida o archivo vacio." -ForegroundColor Red
+        Write-Host "  ERROR: Descarga fallida o archivo vacio." -ForegroundColor Red
         return $false
     }
 
-    Write-Host "  Descarga completada: $([math]::Round((Get-Item $destino).Length/1MB, 2)) MB" -ForegroundColor Green
+    $tamano = [math]::Round((Get-Item $destino).Length / 1MB, 2)
+    Write-Host "  Descarga completada: $tamano MB" -ForegroundColor Green
 
     # Intentar SHA256
     $sha_dest = "$env:TEMP\${Archivo}.sha256"
-    try {
-        if ($curl) {
-            & curl.exe -s -P - -u "${FTP_USER}:${FTP_PASS}" "${url_base}${Archivo}.sha256" -o $sha_dest
-        } else {
-            $wc.DownloadFile("${url_base}${Archivo}.sha256", $sha_dest)
-        }
+    & curl.exe -s --ssl-reqd --insecure -u "${FTP_USER}:${FTP_PASS}" "${url_base}${Archivo}.sha256" -o $sha_dest 2>$null
 
-        if ((Test-Path $sha_dest) -and (Get-Item $sha_dest).Length -gt 0) {
-            $hash_remoto = (Get-Content $sha_dest -Raw).Trim().Split(" ")[0].ToLower()
-            $hash_local  = (Get-FileHash $destino -Algorithm SHA256).Hash.ToLower()
-            Remove-Item $sha_dest -Force -ErrorAction SilentlyContinue
-
-            if ($hash_remoto -eq $hash_local) {
-                Write-Host "  OK Integridad SHA256 verificada." -ForegroundColor Green
-                return $true
-            } else {
-                Write-Host "  ERROR DE INTEGRIDAD SHA256. Abortando." -ForegroundColor Red
-                Remove-Item $destino -Force -ErrorAction SilentlyContinue
-                return $false
-            }
-        }
-    } catch {
+    if ((Test-Path $sha_dest) -and (Get-Item $sha_dest).Length -gt 0) {
+        $hash_remoto = (Get-Content $sha_dest -Raw).Trim().Split(" ")[0].ToLower()
+        $hash_local  = (Get-FileHash $destino -Algorithm SHA256).Hash.ToLower()
         Remove-Item $sha_dest -Force -ErrorAction SilentlyContinue
+
+        if ($hash_remoto -eq $hash_local) {
+            Write-Host "  OK Integridad SHA256 verificada." -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "  ERROR DE INTEGRIDAD SHA256. Abortando." -ForegroundColor Red
+            Remove-Item $destino -Force -ErrorAction SilentlyContinue
+            return $false
+        }
     }
 
     # Fallback MD5
     $md5_dest = "$env:TEMP\${Archivo}.md5"
-    try {
-        if ($curl) {
-            & curl.exe -s -P - -u "${FTP_USER}:${FTP_PASS}" "${url_base}${Archivo}.md5" -o $md5_dest
-        } else {
-            $wc.DownloadFile("${url_base}${Archivo}.md5", $md5_dest)
-        }
+    & curl.exe -s --ssl-reqd --insecure -u "${FTP_USER}:${FTP_PASS}" "${url_base}${Archivo}.md5" -o $md5_dest 2>$null
 
-        if ((Test-Path $md5_dest) -and (Get-Item $md5_dest).Length -gt 0) {
-            $hash_remoto = (Get-Content $md5_dest -Raw).Trim().Split(" ")[0].ToLower()
-            $hash_local  = (Get-FileHash $destino -Algorithm MD5).Hash.ToLower()
-            Remove-Item $md5_dest -Force -ErrorAction SilentlyContinue
-
-            if ($hash_remoto -eq $hash_local) {
-                Write-Host "  OK Integridad MD5 verificada." -ForegroundColor Green
-                return $true
-            } else {
-                Write-Host "  ERROR DE INTEGRIDAD MD5. Abortando." -ForegroundColor Red
-                Remove-Item $destino -Force -ErrorAction SilentlyContinue
-                return $false
-            }
-        }
-    } catch {
+    if ((Test-Path $md5_dest) -and (Get-Item $md5_dest).Length -gt 0) {
+        $hash_remoto = (Get-Content $md5_dest -Raw).Trim().Split(" ")[0].ToLower()
+        $hash_local  = (Get-FileHash $destino -Algorithm MD5).Hash.ToLower()
         Remove-Item $md5_dest -Force -ErrorAction SilentlyContinue
+
+        if ($hash_remoto -eq $hash_local) {
+            Write-Host "  OK Integridad MD5 verificada." -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "  ERROR DE INTEGRIDAD MD5. Abortando." -ForegroundColor Red
+            Remove-Item $destino -Force -ErrorAction SilentlyContinue
+            return $false
+        }
     }
 
     Write-Host "  ADVERTENCIA: Sin .sha256 ni .md5. Se omite validacion." -ForegroundColor Yellow
@@ -368,7 +304,6 @@ function Extraer-Zip {
     New-Item -ItemType Directory -Force -Path $Destino | Out-Null
     Expand-Archive -Path $RutaZip -DestinationPath $Destino -Force
 
-    # Si extrae en subcarpeta unica, mover contenido arriba
     $hijos = Get-ChildItem $Destino
     if ($hijos.Count -eq 1 -and $hijos[0].PSIsContainer) {
         $sub = $hijos[0].FullName
@@ -394,7 +329,6 @@ function Instalar-IIS-Web {
     $puerto_http  = $puertos[0]
     $puerto_https = $puertos[1]
 
-    # Limpiar sitios anteriores
     Get-Website | ForEach-Object {
         Stop-Website   -Name $_.Name -ErrorAction SilentlyContinue
         Remove-Website -Name $_.Name -ErrorAction SilentlyContinue
@@ -441,7 +375,7 @@ function Instalar-IIS-Web {
         <rule name="HTTP a HTTPS" stopProcessing="true">
           <match url="(.*)" />
           <conditions><add input="{HTTPS}" pattern="^OFF`$" /></conditions>
-          <action type="Redirect" url="https://{HTTP_HOST}:{R:1}" redirectType="Permanent" />
+          <action type="Redirect" url="https://{HTTP_HOST}:$puerto_https/{R:1}" redirectType="Permanent" />
         </rule>
       </rules>
     </rewrite>
@@ -510,10 +444,10 @@ function Instalar-Apache {
     $httpd_conf = "$APACHE_DIR\conf\httpd.conf"
     if (Test-Path $httpd_conf) {
         $conf = Get-Content $httpd_conf -Raw
-        $conf = $conf -replace 'Define SRVROOT ".*"',          "Define SRVROOT `"$($APACHE_DIR -replace '\\','/')`""
-        $conf = $conf -replace '(?m)^Listen 80$',               "Listen $puerto_http"
-        $conf = $conf -replace '(?m)^#?(LoadModule rewrite_module)',  'LoadModule rewrite_module'
-        $conf = $conf -replace '(?m)^#?(LoadModule headers_module)',  'LoadModule headers_module'
+        $conf = $conf -replace 'Define SRVROOT ".*"',                        "Define SRVROOT `"$($APACHE_DIR -replace '\\','/')`""
+        $conf = $conf -replace '(?m)^Listen 80$',                             "Listen $puerto_http"
+        $conf = $conf -replace '(?m)^#?(LoadModule rewrite_module)',          'LoadModule rewrite_module'
+        $conf = $conf -replace '(?m)^#?(LoadModule headers_module)',          'LoadModule headers_module'
         $conf | Set-Content $httpd_conf
     }
 
@@ -521,8 +455,8 @@ function Instalar-Apache {
         $cert_dir = Generar-SSL "apache"
 
         $conf = Get-Content $httpd_conf -Raw
-        $conf = $conf -replace '(?m)^#?(LoadModule ssl_module)',           'LoadModule ssl_module'
-        $conf = $conf -replace '(?m)^#?(LoadModule socache_shmcb_module)', 'LoadModule socache_shmcb_module'
+        $conf = $conf -replace '(?m)^#?(LoadModule ssl_module)',              'LoadModule ssl_module'
+        $conf = $conf -replace '(?m)^#?(LoadModule socache_shmcb_module)',    'LoadModule socache_shmcb_module'
         $conf = $conf -replace '(?m)^#?(Include conf/extra/httpd-ssl\.conf)', 'Include conf/extra/httpd-ssl.conf'
         $conf | Set-Content $httpd_conf
 
@@ -685,11 +619,11 @@ function Verificar-HTTP {
 
     $estado = "INACTIVO"
     if ($Servicio -eq "nginx") {
-        $proc = Get-Process nginx -ErrorAction SilentlyContinue
+        $proc  = Get-Process nginx -ErrorAction SilentlyContinue
         $estado = if ($proc) { "ACTIVO" } else { "INACTIVO" }
     } else {
-        $svc = Get-Service $Servicio -ErrorAction SilentlyContinue
-        if ($svc -and $svc.Status -eq "Running") { $estado = "ACTIVO" }
+        $svc   = Get-Service $Servicio -ErrorAction SilentlyContinue
+        $estado = if ($svc -and $svc.Status -eq "Running") { "ACTIVO" } else { "INACTIVO" }
     }
 
     $resp = "N/A"
