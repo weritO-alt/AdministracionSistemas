@@ -1,16 +1,6 @@
 #!/bin/bash
 
-# =============================================================
-#   PRÁCTICA 7 - Orquestador de Instalación con SSL/TLS
-#   Sistema: Fedora Server
-#   Servicios: httpd (Apache), Nginx, Tomcat, vsftpd
-#   Correcciones aplicadas:
-#     - verificar_resumen() llama verificar_http() por cada servicio
-#     - HSTS (Strict-Transport-Security) en Apache y Nginx
-#     - Tomcat: web.xml con security-constraint para redirect real
-#     - Hash: soporta SHA256 y MD5 como fallback
-#     - Array SERVICIOS_VERIFICAR para rastrear puertos y protocolos
-# =============================================================
+
 
 FTP_SERVER="192.168.56.130"
 FTP_USER="anonymous"
@@ -139,21 +129,9 @@ listar_versiones_ftp() {
     echo "" > /dev/tty
     echo "Buscando instaladores de $servicio en /$FTP_BASE/$servicio/ ..." > /dev/tty
 
-    # FIX: intentar primero ftps:// (SSL implícito puerto 990),
-    #      si falla intentar ftp:// (puerto 21 sin SSL)
-    local url_base
-    mapfile -t versiones < <(
-        curl -s -l --insecure -u "$FTP_USER:$FTP_PASS" \
-            "ftps://$FTP_SERVER/$FTP_BASE/$servicio/" 2>/dev/null \
-        | grep -v '\.sha256$' | grep -v '\.md5$'
-    )
-    if [ ${#versiones[@]} -eq 0 ]; then
-        mapfile -t versiones < <(
-            curl -s -l -u "$FTP_USER:$FTP_PASS" \
-                "ftp://$FTP_SERVER/$FTP_BASE/$servicio/" 2>/dev/null \
-            | grep -v '\.sha256$' | grep -v '\.md5$'
-        )
-    fi
+    mapfile -t versiones < <(curl -s -l -u "$FTP_USER:$FTP_PASS" \
+        "ftp://$FTP_SERVER/$FTP_BASE/$servicio/" 2>/dev/null \
+        | grep -v '\.sha256$' | grep -v '\.md5$')
 
     if [ ${#versiones[@]} -eq 0 ]; then
         echo "No se encontraron versiones para $servicio." > /dev/tty
@@ -186,17 +164,12 @@ listar_versiones_ftp() {
 # ─────────────────────────────────────────────────────────────
 descargar_y_validar_hash() {
     local servicio=$1 archivo=$2
-    local ruta_ftps="ftps://$FTP_SERVER/$FTP_BASE/$servicio/"
-    local ruta_ftp="ftp://$FTP_SERVER/$FTP_BASE/$servicio/"
+    local ruta="ftp://$FTP_SERVER/$FTP_BASE/$servicio/"
 
     echo "Descargando $archivo desde FTP..." > /dev/tty
     cd /tmp || exit 1
 
-    # FIX: intentar ftps primero, luego ftp plano
-    curl -s --insecure -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftps}${archivo}" 2>/dev/null
-    if [[ ! -s "$archivo" ]]; then
-        curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftp}${archivo}" 2>/dev/null
-    fi
+    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}"
 
     if [[ ! -f "$archivo" ]]; then
         echo "ERROR: No se pudo descargar $archivo." > /dev/tty
@@ -204,10 +177,7 @@ descargar_y_validar_hash() {
     fi
 
     # ── Intentar SHA256 ───────────────────────────────────────
-    curl -s --insecure -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftps}${archivo}.sha256" 2>/dev/null
-    if [[ ! -s "${archivo}.sha256" ]]; then
-        curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftp}${archivo}.sha256" 2>/dev/null
-    fi
+    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.sha256" 2>/dev/null
 
     if [[ -s "${archivo}.sha256" ]]; then
         local hash_remoto hash_local
@@ -226,10 +196,7 @@ descargar_y_validar_hash() {
 
     # ── Fallback MD5 ──────────────────────────────────────────
     rm -f "${archivo}.sha256"
-    curl -s --insecure -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftps}${archivo}.md5" 2>/dev/null
-    if [[ ! -s "${archivo}.md5" ]]; then
-        curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta_ftp}${archivo}.md5" 2>/dev/null
-    fi
+    curl -s -u "$FTP_USER:$FTP_PASS" -O "${ruta}${archivo}.md5" 2>/dev/null
 
     if [[ -s "${archivo}.md5" ]]; then
         local hash_remoto hash_local
