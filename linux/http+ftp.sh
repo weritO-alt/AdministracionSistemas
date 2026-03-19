@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# ============================================================
+#  main.sh  -  Practica 7: Orquestador Linux (FEDORA)
+#  Un solo archivo, sin modularizacion
+#  Servicios: Apache (httpd) · Nginx · Tomcat · vsftpd
+#  Fuentes  : WEB (dnf) o FTPS (repositorio privado)
+# ============================================================
 
 if [[ "$EUID" -ne 0 ]]; then
     echo "[ERROR] Ejecuta como root: sudo bash main.sh"
