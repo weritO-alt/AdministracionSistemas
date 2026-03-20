@@ -679,7 +679,7 @@ function Menu-FTP-HTTP {
     $global:FTP_IP   = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -notlike "169.*" } | Select-Object -First 1).IPAddress
     $global:FTP_USER = "anonymous"
     $global:FTP_PASS = ""
-    $global:FTP_BASE = "ftp://$global:FTP_IP/http/Windows"
+    $global:FTP_BASE = "ftp://127.0.0.1/http/Windows"
 
     Asegurar-FTP-Activo
 
