@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # MODULO HTTP/FTP COMBINADO - WINDOWS (P07)
 # ==============================================================================
 
@@ -27,7 +27,7 @@ function Limpiar-Entorno {
 function Crear-Pagina {
     param($servicio, $puerto)
     $paths = @{
-        "nginx"  = "C:\tools\nginx\html\index.html"
+        "nginx"  = "C:\tools\nginx-1.29.6\html\index.html"
         "apache" = "C:\Users\Administrator\AppData\Roaming\Apache24\htdocs\index.html"
         "iis"    = "C:\inetpub\wwwroot\index.html"
     }
@@ -120,7 +120,7 @@ function Aplicar-Despliegue {
     switch ($Servicio) {
 
         "nginx" {
-            $nginxExeItem = Get-ChildItem "C:\tools\nginx" -Recurse -Filter "nginx.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            $nginxExeItem = Get-ChildItem "C:\tools\nginx-1.29.6" -Recurse -Filter "nginx.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
             if (!$nginxExeItem) { Write-Host "[!] nginx.exe no encontrado en C:\tools\nginx" -ForegroundColor Red; Pause; return }
             $nginxDir = $nginxExeItem.DirectoryName
             $conf     = "$nginxDir\conf\nginx.conf"
@@ -344,7 +344,7 @@ function Listar-Archivos-FTP {
     param($url, $usuario, $clave)
     try {
         $req = [System.Net.FtpWebRequest]::Create($url)
-        $req.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectoryDetails
+        $req.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectory
         $req.Credentials = New-Object System.Net.NetworkCredential($usuario, $clave)
         $req.UsePassive = $true; $req.UseBinary = $true; $req.KeepAlive = $false
         $resp   = $req.GetResponse()
@@ -723,3 +723,10 @@ function Menu-FTP-HTTP {
         }
     }
 }
+
+Menu-FTP-HTTP
+
+
+
+
+
