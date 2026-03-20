@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # MODULO HTTP/FTP COMBINADO - WINDOWS (P07)
 # ==============================================================================
 
@@ -35,15 +35,15 @@ function Crear-Pagina {
     if (!$path) { return }
     $dir = Split-Path $path
     if (!(Test-Path $dir)) { New-Item $dir -ItemType Directory -Force | Out-Null }
-    $colores = @{ "nginx" = "#0f9b58"; "apache" = "#d4380d"; "iis" = "#0078d7" }
-    $color = $colores[$servicio]
-    $html = "<html><head><title>$($servicio.ToUpper()) - Puerto $puerto</title>"
-    $html += "<style>body{font-family:Arial;background:#1a1a2e;color:#eee;display:flex;"
-    $html += "justify-content:center;align-items:center;height:100vh;margin:0}"
-    $html += ".box{text-align:center;padding:40px;background:#16213e;border-radius:12px;"
-    $html += "border:2px solid $color}h1{color:$color}</style></head>"
-    $html += "<body><div class='box'><h1>$($servicio.ToUpper()) Activo</h1>"
-    $html += "<p>Puerto: <strong>$puerto</strong></p></div></body></html>"
+    $html  = "<html>"
+    $html += "<head><title>$($servicio.ToUpper()) - Puerto $puerto</title></head>"
+    $html += "<body>"
+    $html += "<h1>$($servicio.ToUpper()) Activo</h1>"
+    $html += "<p>Servicio: $($servicio.ToUpper())</p>"
+    $html += "<p>Puerto: $puerto</p>"
+
+    $html += "</body>"
+    $html += "</html>"
     Set-Content $path $html -Encoding ASCII
 }
 
@@ -120,7 +120,7 @@ function Aplicar-Despliegue {
     switch ($Servicio) {
 
         "nginx" {
-            $nginxExeItem = Get-ChildItem "C:\tools\nginx-1.29.6" -Recurse -Filter "nginx.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            $nginxExeItem = Get-ChildItem "C:\tools\nginx" -Recurse -Filter "nginx.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
             if (!$nginxExeItem) { Write-Host "[!] nginx.exe no encontrado en C:\tools\nginx" -ForegroundColor Red; Pause; return }
             $nginxDir = $nginxExeItem.DirectoryName
             $conf     = "$nginxDir\conf\nginx.conf"
@@ -344,7 +344,7 @@ function Listar-Archivos-FTP {
     param($url, $usuario, $clave)
     try {
         $req = [System.Net.FtpWebRequest]::Create($url)
-        $req.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectory
+        $req.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectoryDetails
         $req.Credentials = New-Object System.Net.NetworkCredential($usuario, $clave)
         $req.UsePassive = $true; $req.UseBinary = $true; $req.KeepAlive = $false
         $resp   = $req.GetResponse()
@@ -723,10 +723,3 @@ function Menu-FTP-HTTP {
         }
     }
 }
-
-Menu-FTP-HTTP
-
-
-
-
-
