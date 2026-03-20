@@ -2,12 +2,18 @@
 #   PRACTICA 7 - Orquestador de Instalacion con SSL/TLS
 #   Sistema: Windows Server 2019
 #   Servicios WEB : IIS, Apache, Nginx
-#   FTP           : Cada servicio tiene su propio servidor FTP
-#                   IIS    -> FTP en puerto 2121
-#                   Apache -> FTP en puerto 2122
-#                   Nginx  -> FTP en puerto 2123
+#   FTP           : Servidor Python (pyftpdlib) independiente
+#                   por cada servicio
+#                   IIS    -> puerto 2121
+#                   Apache -> puerto 2122
+#                   Nginx  -> puerto 2123
 #
-#   Ejecutar como Administrador:
+#   PRE-REQUISITOS:
+#   1. Python 3.12 instalado en C:\Program Files\Python312\
+#   2. pip install pyftpdlib
+#   3. Ejecutar como Administrador
+#
+#   Ejecutar:
 #   powershell -ExecutionPolicy Bypass -File practica7_windows.ps1
 # =============================================================
 
@@ -16,21 +22,22 @@
 # -------------------------------------------------------------
 # VARIABLES GLOBALES
 # -------------------------------------------------------------
-$FTP_USER     = "repositorio"
-$FTP_PASS     = "Hola1234."
-$FTP_ROOT     = "C:\FTP\Repositorio"
+$FTP_USER    = "repositorio"
+$FTP_PASS    = "Hola1234."
+$FTP_ROOT    = "C:\FTP\Repositorio"
+$FTP_SCRIPT  = "C:\FTP\ftp_server.py"
+$PYTHON_EXE  = "C:\Program Files\Python312\python.exe"
 
-# Puerto FTP independiente por servicio
-$FTP_PUERTOS  = @{
+$FTP_PUERTOS = @{
     "IIS"    = 2121
     "Apache" = 2122
     "Nginx"  = 2123
 }
 
-$BASE_DIR     = "C:\Servicios"
-$APACHE_DIR   = "$BASE_DIR\Apache"
-$NGINX_DIR    = "$BASE_DIR\Nginx"
-$SSL_DIR      = "$BASE_DIR\SSL"
+$BASE_DIR    = "C:\Servicios"
+$APACHE_DIR  = "$BASE_DIR\Apache"
+$NGINX_DIR   = "$BASE_DIR\Nginx"
+$SSL_DIR     = "$BASE_DIR\SSL"
 
 $script:RESUMEN_INSTALACIONES = @()
 $script:SERVICIOS_VERIFICAR   = @()
@@ -94,131 +101,117 @@ function Main {
     }
 }
 
-# -------------------------------------------------------------
+# =============================================================
+# SERVIDORES FTP PYTHON
+# =============================================================
+
+function Crear-Script-FTP {
+    # Crea el script Python del servidor FTP si no existe
+    if (Test-Path $FTP_SCRIPT) { return }
+    New-Item -ItemType Directory -Force -Path "C:\FTP" | Out-Null
+
+    $pyScript = @"
+from pyftpdlib.handlers import FTPHandler
+from pyftpdlib.servers import FTPServer
+from pyftpdlib.authorizers import DummyAuthorizer
+import sys
+
+puerto  = int(sys.argv[1])
+carpeta = sys.argv[2]
+usuario = sys.argv[3]
+password = sys.argv[4]
+
+authorizer = DummyAuthorizer()
+authorizer.add_user(usuario, password, carpeta, perm='elradfmwMT')
+
+handler = FTPHandler
+handler.authorizer = authorizer
+handler.passive_ports = range(40000, 50000)
+
+print(f'Iniciando FTP en puerto {puerto} sirviendo {carpeta}')
+server = FTPServer(('0.0.0.0', puerto), handler)
+server.serve_forever()
+"@
+    Set-Content $FTP_SCRIPT $pyScript -Encoding UTF8
+    Write-Host "  OK Script FTP Python creado." -ForegroundColor Green
+}
+
+function Arrancar-Servidores-FTP {
+    Write-Host ""
+    Write-Host "Arrancando servidores FTP Python independientes..." -ForegroundColor Cyan
+
+    # Verificar Python
+    if (-not (Test-Path $PYTHON_EXE)) {
+        Write-Host "  ERROR: Python no encontrado en $PYTHON_EXE" -ForegroundColor Red
+        Write-Host "  Instala Python 3.12 y ejecuta: pip install pyftpdlib" -ForegroundColor Yellow
+        return $false
+    }
+
+    # Crear script FTP
+    Crear-Script-FTP
+
+    # Detener IIS FTP para liberar puertos
+    Stop-Service FTPSVC -Force -ErrorAction SilentlyContinue
+
+    # Detener procesos Python anteriores en estos puertos
+    Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+
+    # Arrancar un servidor FTP por cada servicio
+    foreach ($svc in @("IIS","Apache","Nginx")) {
+        $puerto  = $FTP_PUERTOS[$svc]
+        $carpeta = "$FTP_ROOT\$svc"
+
+        if (-not (Test-Path $carpeta)) {
+            New-Item -ItemType Directory -Force -Path $carpeta | Out-Null
+        }
+
+        Start-Job -ScriptBlock {
+            param($exe, $script, $puerto, $carpeta, $user, $pass)
+            & $exe $script $puerto $carpeta $user $pass
+        } -ArgumentList $PYTHON_EXE, $FTP_SCRIPT, $puerto, $carpeta, $FTP_USER, $FTP_PASS | Out-Null
+
+        Write-Host "  OK FTP-$svc arrancado en puerto $puerto -> $carpeta" -ForegroundColor Green
+    }
+
+    Start-Sleep -Seconds 3
+
+    # Verificar que arrancaron
+    $ok = $true
+    foreach ($svc in @("IIS","Apache","Nginx")) {
+        $puerto = $FTP_PUERTOS[$svc]
+        $test   = netstat -an | Select-String ":$puerto "
+        if ($test) {
+            Write-Host "  OK Puerto $puerto escuchando (FTP-$svc)" -ForegroundColor Green
+        } else {
+            Write-Host "  ERROR: Puerto $puerto no esta activo (FTP-$svc)" -ForegroundColor Red
+            $ok = $false
+        }
+    }
+    return $ok
+}
+
+# =============================================================
 # PREPARAR REPOSITORIOS FTP
-# Crea un sitio FTP independiente por cada servicio y
-# descarga los instaladores correspondientes
-# -------------------------------------------------------------
+# =============================================================
 function Preparar-Repositorios-FTP {
     Write-Host ""
-    Write-Host "--- PREPARANDO REPOSITORIOS FTP INDEPENDIENTES ---" -ForegroundColor Cyan
+    Write-Host "--- PREPARANDO REPOSITORIOS FTP ---" -ForegroundColor Cyan
 
-    # Instalar IIS + FTP si no esta
-    Write-Host "Instalando IIS y modulo FTP..."
-    Install-WindowsFeature Web-Server, Web-Ftp-Server -IncludeManagementTools | Out-Null
-    Import-Module WebAdministration -ErrorAction SilentlyContinue
-
-    # Desbloquear seccion de autorizacion FTP
-    & "$env:windir\system32\inetsrv\appcmd.exe" unlock config `
-        -section:system.ftpServer/security/authorization 2>$null | Out-Null
-
-    # Crear usuario repositorio
-    $existe = Get-LocalUser -Name $FTP_USER -ErrorAction SilentlyContinue
-    if (-not $existe) {
-        $pwd_sec = ConvertTo-SecureString $FTP_PASS -AsPlainText -Force
-        New-LocalUser -Name $FTP_USER -Password $pwd_sec `
-            -FullName "Repositorio FTP" -PasswordNeverExpires | Out-Null
-        Write-Host "  OK Usuario '$FTP_USER' creado." -ForegroundColor Green
-    } else {
-        # Resetear contrasena por si acaso
-        net user $FTP_USER $FTP_PASS | Out-Null
-        Write-Host "  OK Usuario '$FTP_USER' ya existe." -ForegroundColor Green
+    # Crear carpetas
+    foreach ($svc in @("IIS","Apache","Nginx")) {
+        New-Item -ItemType Directory -Force -Path "$FTP_ROOT\$svc" | Out-Null
     }
 
-    # Agregar al grupo Usuarios si no esta
-    net localgroup "Usuarios" $FTP_USER /add 2>$null | Out-Null
-
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $wc = New-Object System.Net.WebClient
-
-    # Crear un FTP por cada servicio
-    foreach ($servicio in @("IIS","Apache","Nginx")) {
-        $puerto  = $FTP_PUERTOS[$servicio]
-        $carpeta = "$FTP_ROOT\$servicio"
-        $sitio   = "FTP-$servicio"
-
-        Write-Host ""
-        Write-Host "  Configurando FTP para $servicio (puerto $puerto)..." -ForegroundColor Yellow
-
-        # Crear carpeta
-        New-Item -ItemType Directory -Force -Path $carpeta | Out-Null
-
-        # Eliminar sitio FTP anterior si existe
-        $s = Get-WebSite -Name $sitio -ErrorAction SilentlyContinue
-        if ($s) {
-            Stop-WebSite  -Name $sitio -ErrorAction SilentlyContinue
-            Remove-WebSite -Name $sitio -ErrorAction SilentlyContinue
-        }
-
-        # Crear sitio FTP
-        New-WebFtpSite -Name $sitio -Port $puerto -PhysicalPath $carpeta -Force | Out-Null
-
-        # Sin SSL en canal de control/datos
-        Set-ItemProperty "IIS:\Sites\$sitio" `
-            -Name ftpServer.security.ssl.controlChannelPolicy -Value 0
-        Set-ItemProperty "IIS:\Sites\$sitio" `
-            -Name ftpServer.security.ssl.dataChannelPolicy -Value 0
-
-        # Sin user isolation
-        Set-ItemProperty "IIS:\Sites\$sitio" `
-            -Name ftpServer.userIsolation.mode -Value 0
-
-        # Autenticacion basica via applicationHost.config
-        $config   = "C:\Windows\System32\inetsrv\config\applicationHost.config"
-        $contenido = Get-Content $config -Raw
-
-        # Reemplazar bloque ftpServer del sitio con auth incluida
-        $viejo = "<ftpServer>`r`n                    <security>`r`n                        <ssl controlChannelPolicy=`"SslAllow`" dataChannelPolicy=`"SslAllow`" />`r`n                    </security>`r`n                </ftpServer>"
-        # Verificar si ya tiene authentication
-        if ($contenido -notmatch "FTP-$servicio[\s\S]*?basicAuthentication") {
-            # Agregar autenticacion via appcmd
-            & "$env:windir\system32\inetsrv\appcmd.exe" set config "$sitio" `
-                -section:system.ftpServer/security/authorization `
-                /+"[accessType='Allow',users='$FTP_USER',permissions='Read,Write']" 2>$null | Out-Null
-        }
-
-        # Activar basicAuthentication directo en el XML del sitio
-        $xml = [xml](Get-Content $config -Encoding UTF8)
-        $nodo = $xml.configuration.'system.applicationHost'.sites.site |
-                Where-Object { $_.name -eq $sitio }
-        if ($nodo) {
-            $ftpSec = $nodo.ftpServer.security
-            if ($ftpSec -and -not $ftpSec.authentication) {
-                $authNode  = $xml.CreateElement("authentication")
-                $basicNode = $xml.CreateElement("basicAuthentication")
-                $basicNode.SetAttribute("enabled","true")
-                $anonNode  = $xml.CreateElement("anonymousAuthentication")
-                $anonNode.SetAttribute("enabled","false")
-                $authNode.AppendChild($basicNode) | Out-Null
-                $authNode.AppendChild($anonNode)  | Out-Null
-                $ftpSec.AppendChild($authNode)    | Out-Null
-                $xml.Save($config)
-            }
-        }
-
-        # Permisos NTFS
-        $acl   = Get-Acl $carpeta
-        $regla = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $FTP_USER,"FullControl","ContainerInherit,ObjectInherit","None","Allow")
-        $acl.SetAccessRule($regla)
-        Set-Acl $carpeta $acl
-
-        # Firewall
-        New-NetFirewallRule -DisplayName "FTP-$servicio-$puerto" `
-            -Direction Inbound -Protocol TCP -LocalPort $puerto `
-            -Action Allow -ErrorAction SilentlyContinue | Out-Null
-
-        # Arrancar sitio
-        Start-WebSite -Name $sitio -ErrorAction SilentlyContinue
-
-        Write-Host "  OK Sitio FTP-$servicio en puerto $puerto" -ForegroundColor Green
-    }
-
-    iisreset /restart | Out-Null
+    # Arrancar servidores FTP Python
+    $ftpOk = Arrancar-Servidores-FTP
+    if (-not $ftpOk) { return }
 
     # Descargar instaladores
     Write-Host ""
     Write-Host "Descargando instaladores..." -ForegroundColor Yellow
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $wc = New-Object System.Net.WebClient
 
     Write-Host "  -> Apache httpd (~35MB)..."
     try {
@@ -266,21 +259,28 @@ function Preparar-Repositorios-FTP {
 }
 
 # -------------------------------------------------------------
-# LISTAR VERSIONES DESDE FTP INDEPENDIENTE DEL SERVICIO
+# LISTAR VERSIONES DESDE FTP PYTHON
 # -------------------------------------------------------------
 function Listar-Versiones-FTP {
     param($Servicio)
     $puerto = $FTP_PUERTOS[$Servicio]
-    $url    = "ftp://127.0.0.1:$puerto/"
+
+    # Verificar si el FTP esta corriendo
+    $test = netstat -an | Select-String ":$puerto "
+    if (-not $test) {
+        Write-Host ""
+        Write-Host "  FTP-$Servicio no esta corriendo. Arrancando..." -ForegroundColor Yellow
+        Arrancar-Servidores-FTP | Out-Null
+    }
 
     Write-Host ""
-    Write-Host "Conectando al FTP-$Servicio (puerto $puerto)..." -ForegroundColor Cyan
+    Write-Host "Conectando al FTP-${Servicio} (puerto $puerto)..." -ForegroundColor Cyan
 
-    $raw = & curl.exe -s -l -u "${FTP_USER}:${FTP_PASS}" $url 2>&1
+    $raw = & curl.exe -s -l -u "${FTP_USER}:${FTP_PASS}" "ftp://127.0.0.1:$puerto/" 2>&1
 
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
         Write-Host "  ERROR: No se pudo conectar al FTP-$Servicio." -ForegroundColor Red
-        Write-Host "  Ejecuta primero la opcion 4 para preparar los repositorios." -ForegroundColor Yellow
+        Write-Host "  Ejecuta primero la opcion 4." -ForegroundColor Yellow
         return "INVALIDO"
     }
 
@@ -294,7 +294,7 @@ function Listar-Versiones-FTP {
         return "INVALIDO"
     }
 
-    Write-Host "Versiones disponibles en FTP-$Servicio:"
+    Write-Host "Versiones disponibles en FTP-${Servicio}:"
     for ($i = 0; $i -lt $versiones.Count; $i++) {
         Write-Host "  $($i+1)) $($versiones[$i])"
     }
@@ -309,7 +309,7 @@ function Listar-Versiones-FTP {
 }
 
 # -------------------------------------------------------------
-# DESCARGA DESDE FTP INDEPENDIENTE + VALIDACION SHA256
+# DESCARGA DESDE FTP PYTHON + VALIDACION SHA256
 # -------------------------------------------------------------
 function Descargar-Y-Validar {
     param($Servicio, $Archivo)
@@ -568,10 +568,10 @@ function Instalar-IIS-Web {
         Set-Content -Path "$sitePath\web.config" -Value $webConfig -Force
         Abrir-Puerto-Firewall $puerto_https "IIS-HTTPS"
         $script:SERVICIOS_VERIFICAR   += "IIS-SSL|W3SVC|$puerto_https|https"
-        $script:RESUMEN_INSTALACIONES += "IIS Web | SSL:S | HTTP:$puerto_http -> HTTPS:$puerto_https | HSTS activo | FTP propio: puerto $($FTP_PUERTOS['IIS'])"
+        $script:RESUMEN_INSTALACIONES += "IIS Web | SSL:S | HTTP:$puerto_http -> HTTPS:$puerto_https | HSTS activo | FTP: puerto $($FTP_PUERTOS['IIS'])"
     } else {
         New-Website -Name $siteName -Port $puerto_http -PhysicalPath $sitePath -Force | Out-Null
-        $script:RESUMEN_INSTALACIONES += "IIS Web | SSL:N | HTTP:$puerto_http | FTP propio: puerto $($FTP_PUERTOS['IIS'])"
+        $script:RESUMEN_INSTALACIONES += "IIS Web | SSL:N | HTTP:$puerto_http | FTP: puerto $($FTP_PUERTOS['IIS'])"
     }
 
     Abrir-Puerto-Firewall $puerto_http "IIS-HTTP"
@@ -668,9 +668,9 @@ SSLSessionCacheTimeout 300
         Set-Content "$conf_dir\httpd-ssl.conf" $ssl_conf
         Abrir-Puerto-Firewall $puerto_https "Apache-HTTPS"
         $script:SERVICIOS_VERIFICAR   += "Apache-SSL|Apache2.4|$puerto_https|https"
-        $script:RESUMEN_INSTALACIONES += "Apache  | SSL:S | HTTP:$puerto_http -> HTTPS:$puerto_https | HSTS activo | FTP propio: puerto $($FTP_PUERTOS['Apache'])"
+        $script:RESUMEN_INSTALACIONES += "Apache  | SSL:S | HTTP:$puerto_http -> HTTPS:$puerto_https | HSTS activo | FTP: puerto $($FTP_PUERTOS['Apache'])"
     } else {
-        $script:RESUMEN_INSTALACIONES += "Apache  | SSL:N | HTTP:$puerto_http | FTP propio: puerto $($FTP_PUERTOS['Apache'])"
+        $script:RESUMEN_INSTALACIONES += "Apache  | SSL:N | HTTP:$puerto_http | FTP: puerto $($FTP_PUERTOS['Apache'])"
     }
 
     Abrir-Puerto-Firewall $puerto_http "Apache-HTTP"
@@ -758,7 +758,7 @@ http {
 "@
         Abrir-Puerto-Firewall $puerto_https "Nginx-HTTPS"
         $script:SERVICIOS_VERIFICAR   += "Nginx-SSL|nginx|$puerto_https|https"
-        $script:RESUMEN_INSTALACIONES += "Nginx   | SSL:S | HTTP:$puerto_http -> HTTPS:$puerto_https | HSTS activo | FTP propio: puerto $($FTP_PUERTOS['Nginx'])"
+        $script:RESUMEN_INSTALACIONES += "Nginx   | SSL:S | HTTP:$puerto_http -> HTTPS:$puerto_https | HSTS activo | FTP: puerto $($FTP_PUERTOS['Nginx'])"
     } else {
         $nginx_conf = @"
 worker_processes 1;
@@ -776,7 +776,7 @@ http {
     }
 }
 "@
-        $script:RESUMEN_INSTALACIONES += "Nginx   | SSL:N | HTTP:$puerto_http | FTP propio: puerto $($FTP_PUERTOS['Nginx'])"
+        $script:RESUMEN_INSTALACIONES += "Nginx   | SSL:N | HTTP:$puerto_http | FTP: puerto $($FTP_PUERTOS['Nginx'])"
     }
 
     Set-Content "$NGINX_DIR\conf\nginx.conf" $nginx_conf -Encoding ASCII
@@ -841,7 +841,7 @@ function Mostrar-Resumen {
     }
 
     Write-Host ""
-    Write-Host "-- Verificacion activa -----------------------------------"
+    Write-Host "-- Verificacion activa de servicios web ------------------"
     if ($script:SERVICIOS_VERIFICAR.Count -eq 0) {
         Write-Host "  (sin servicios registrados aun)"
     } else {
@@ -852,15 +852,11 @@ function Mostrar-Resumen {
     }
 
     Write-Host ""
-    Write-Host "-- Servidores FTP independientes -------------------------"
+    Write-Host "-- Servidores FTP Python independientes ------------------"
     foreach ($svc in @("IIS","Apache","Nginx")) {
         $puerto = $FTP_PUERTOS[$svc]
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        try {
-            $tcp.Connect("127.0.0.1", $puerto)
-            $estado = if ($tcp.Connected) { "ACTIVO" } else { "INACTIVO" }
-            $tcp.Close()
-        } catch { $estado = "INACTIVO" }
+        $test   = netstat -an | Select-String ":$puerto "
+        $estado = if ($test) { "ACTIVO" } else { "INACTIVO" }
         Write-Host "  [FTP-$svc] Puerto:$puerto -> $estado"
     }
 
