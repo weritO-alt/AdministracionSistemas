@@ -9,7 +9,7 @@
 #                   Nginx  -> puerto 2123
 #
 #   PRE-REQUISITOS:
-#   1. Python 3.12 instalado en C:\Program Files\Python312\
+#   1. Python 3.12 en C:\Program Files\Python312\
 #   2. pip install pyftpdlib
 #   3. Ejecutar como Administrador
 #
@@ -42,9 +42,14 @@ $SSL_DIR     = "$BASE_DIR\SSL"
 $script:RESUMEN_INSTALACIONES = @()
 $script:SERVICIOS_VERIFICAR   = @()
 
-# -------------------------------------------------------------
-# MENU PRINCIPAL
-# -------------------------------------------------------------
+# =============================================================
+# MENU PRINCIPAL - Flujo correcto:
+# 1) Elegir servicio
+# 2) Elegir origen (Web o FTP)
+# 3) Elegir SSL
+# 4) Si FTP: listar y descargar
+# 5) Instalar
+# =============================================================
 function Main {
     while ($true) {
         Write-Host ""
@@ -68,31 +73,37 @@ function Main {
             default { Write-Host "Opcion invalida." -ForegroundColor Red; continue }
         }
 
+        # Determinar nombre del servicio PRIMERO
+        $nombreServicio = switch ($opcion) {
+            "1" { "IIS"    }
+            "2" { "Apache" }
+            "3" { "Nginx"  }
+        }
+
+        # Origen
         Write-Host ""
-        Write-Host "De donde deseas instalar?"
+        Write-Host "De donde deseas instalar $nombreServicio?"
         Write-Host " 1) WEB (descarga directa desde Internet)"
-        Write-Host " 2) FTP (repositorio local del servicio)"
+        Write-Host " 2) FTP (repositorio local - puerto $($FTP_PUERTOS[$nombreServicio]))"
         Write-Host " 0) Regresar"
         $origen = Read-Host "Selecciona origen"
         if ($origen -eq "0") { continue }
         $web_ftp = if ($origen -eq "2") { "FTP" } else { "WEB" }
 
+        # SSL
         $ssl = Preguntar-SSL
         if ($ssl -eq "REGRESAR") { continue }
 
+        # Si es FTP: listar y descargar
         $archivo = ""
         if ($web_ftp -eq "FTP") {
-            $carpeta = switch ($opcion) {
-                "1" { "IIS"    }
-                "2" { "Apache" }
-                "3" { "Nginx"  }
-            }
-            $archivo = Listar-Versiones-FTP $carpeta
+            $archivo = Listar-Versiones-FTP $nombreServicio
             if ($archivo -in "INVALIDO","REGRESAR") {
                 Write-Host "Operacion cancelada." -ForegroundColor Yellow; continue
             }
         }
 
+        # Instalar
         switch ($opcion) {
             "1" { Instalar-IIS-Web $archivo $web_ftp $ssl }
             "2" { Instalar-Apache  $archivo $web_ftp $ssl }
@@ -104,9 +115,7 @@ function Main {
 # =============================================================
 # SERVIDORES FTP PYTHON
 # =============================================================
-
 function Crear-Script-FTP {
-    # Crea el script Python del servidor FTP si no existe
     if (Test-Path $FTP_SCRIPT) { return }
     New-Item -ItemType Directory -Force -Path "C:\FTP" | Out-Null
 
@@ -116,9 +125,9 @@ from pyftpdlib.servers import FTPServer
 from pyftpdlib.authorizers import DummyAuthorizer
 import sys
 
-puerto  = int(sys.argv[1])
-carpeta = sys.argv[2]
-usuario = sys.argv[3]
+puerto   = int(sys.argv[1])
+carpeta  = sys.argv[2]
+usuario  = sys.argv[3]
 password = sys.argv[4]
 
 authorizer = DummyAuthorizer()
@@ -128,7 +137,7 @@ handler = FTPHandler
 handler.authorizer = authorizer
 handler.passive_ports = range(40000, 50000)
 
-print(f'Iniciando FTP en puerto {puerto} sirviendo {carpeta}')
+print(f'FTP corriendo en puerto {puerto} -> {carpeta}')
 server = FTPServer(('0.0.0.0', puerto), handler)
 server.serve_forever()
 "@
@@ -138,26 +147,23 @@ server.serve_forever()
 
 function Arrancar-Servidores-FTP {
     Write-Host ""
-    Write-Host "Arrancando servidores FTP Python independientes..." -ForegroundColor Cyan
+    Write-Host "Arrancando servidores FTP Python..." -ForegroundColor Cyan
 
-    # Verificar Python
     if (-not (Test-Path $PYTHON_EXE)) {
         Write-Host "  ERROR: Python no encontrado en $PYTHON_EXE" -ForegroundColor Red
-        Write-Host "  Instala Python 3.12 y ejecuta: pip install pyftpdlib" -ForegroundColor Yellow
+        Write-Host "  Instala Python 3.12 y corre: pip install pyftpdlib" -ForegroundColor Yellow
         return $false
     }
 
-    # Crear script FTP
     Crear-Script-FTP
 
     # Detener IIS FTP para liberar puertos
     Stop-Service FTPSVC -Force -ErrorAction SilentlyContinue
 
-    # Detener procesos Python anteriores en estos puertos
+    # Matar procesos Python anteriores
     Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 
-    # Arrancar un servidor FTP por cada servicio
     foreach ($svc in @("IIS","Apache","Nginx")) {
         $puerto  = $FTP_PUERTOS[$svc]
         $carpeta = "$FTP_ROOT\$svc"
@@ -176,15 +182,13 @@ function Arrancar-Servidores-FTP {
 
     Start-Sleep -Seconds 3
 
-    # Verificar que arrancaron
     $ok = $true
     foreach ($svc in @("IIS","Apache","Nginx")) {
         $puerto = $FTP_PUERTOS[$svc]
-        $test   = netstat -an | Select-String ":$puerto "
-        if ($test) {
+        if (netstat -an | Select-String ":$puerto ") {
             Write-Host "  OK Puerto $puerto escuchando (FTP-$svc)" -ForegroundColor Green
         } else {
-            Write-Host "  ERROR: Puerto $puerto no esta activo (FTP-$svc)" -ForegroundColor Red
+            Write-Host "  ERROR: Puerto $puerto no activo (FTP-$svc)" -ForegroundColor Red
             $ok = $false
         }
     }
@@ -198,16 +202,13 @@ function Preparar-Repositorios-FTP {
     Write-Host ""
     Write-Host "--- PREPARANDO REPOSITORIOS FTP ---" -ForegroundColor Cyan
 
-    # Crear carpetas
     foreach ($svc in @("IIS","Apache","Nginx")) {
         New-Item -ItemType Directory -Force -Path "$FTP_ROOT\$svc" | Out-Null
     }
 
-    # Arrancar servidores FTP Python
     $ftpOk = Arrancar-Servidores-FTP
     if (-not $ftpOk) { return }
 
-    # Descargar instaladores
     Write-Host ""
     Write-Host "Descargando instaladores..." -ForegroundColor Yellow
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -229,7 +230,6 @@ function Preparar-Repositorios-FTP {
         Write-Host "     OK nginx-1.26.2.zip" -ForegroundColor Green
     } catch { Write-Host "     ERROR: $_" -ForegroundColor Red }
 
-    # Generar SHA256
     Write-Host ""
     Write-Host "Generando SHA256..." -ForegroundColor Yellow
     Get-ChildItem $FTP_ROOT -Recurse -File |
@@ -265,16 +265,15 @@ function Listar-Versiones-FTP {
     param($Servicio)
     $puerto = $FTP_PUERTOS[$Servicio]
 
-    # Verificar si el FTP esta corriendo
-    $test = netstat -an | Select-String ":$puerto "
-    if (-not $test) {
-        Write-Host ""
+    # Arrancar FTP si no esta corriendo
+    if (-not (netstat -an | Select-String ":$puerto ")) {
         Write-Host "  FTP-$Servicio no esta corriendo. Arrancando..." -ForegroundColor Yellow
         Arrancar-Servidores-FTP | Out-Null
+        Start-Sleep -Seconds 2
     }
 
     Write-Host ""
-    Write-Host "Conectando al FTP-${Servicio} (puerto $puerto)..." -ForegroundColor Cyan
+    Write-Host "Conectando al FTP-$Servicio (puerto $puerto)..." -ForegroundColor Cyan
 
     $raw = & curl.exe -s -l -u "${FTP_USER}:${FTP_PASS}" "ftp://127.0.0.1:$puerto/" 2>&1
 
@@ -294,7 +293,7 @@ function Listar-Versiones-FTP {
         return "INVALIDO"
     }
 
-    Write-Host "Versiones disponibles en FTP-${Servicio}:"
+    Write-Host "Versiones disponibles en FTP-$Servicio:"
     for ($i = 0; $i -lt $versiones.Count; $i++) {
         Write-Host "  $($i+1)) $($versiones[$i])"
     }
@@ -367,7 +366,7 @@ function Descargar-Y-Validar {
         }
     }
 
-    Write-Host "  ADVERTENCIA: Sin hash disponible. Se omite validacion." -ForegroundColor Yellow
+    Write-Host "  ADVERTENCIA: Sin hash. Se omite validacion." -ForegroundColor Yellow
     return $true
 }
 
@@ -855,8 +854,7 @@ function Mostrar-Resumen {
     Write-Host "-- Servidores FTP Python independientes ------------------"
     foreach ($svc in @("IIS","Apache","Nginx")) {
         $puerto = $FTP_PUERTOS[$svc]
-        $test   = netstat -an | Select-String ":$puerto "
-        $estado = if ($test) { "ACTIVO" } else { "INACTIVO" }
+        $estado = if (netstat -an | Select-String ":$puerto ") { "ACTIVO" } else { "INACTIVO" }
         Write-Host "  [FTP-$svc] Puerto:$puerto -> $estado"
     }
 
