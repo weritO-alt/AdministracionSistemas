@@ -1,3 +1,8 @@
+# =============================================================================
+# prac8.ps1
+# Descripcion: Script principal con menu interactivo para la Practica 8.
+# Ejecutar como Administrador en el Windows Server (Domain Controller)
+# =============================================================================
 
 # ======================== VARIABLES GLOBALES ========================
 $rutaCSV = "C:\Users\Administrador\AdministracionSistemas\windows\usuarios.csv"
@@ -20,14 +25,14 @@ function Mostrar-Menu {
     Mostrar-Banner
     Write-Host "  Selecciona una opcion:" -ForegroundColor White
     Write-Host ""
-    Write-Host "  [1]  Instalar Requisitos (FSRM + GPMC)"          -ForegroundColor Yellow
-    Write-Host "  [2]  Crear Estructura AD (OUs + Grupos)"          -ForegroundColor Yellow
-    Write-Host "  [3]  Importar Usuarios desde CSV"                 -ForegroundColor Yellow
-    Write-Host "  [4]  Configurar Carpetas y Permisos NTFS"         -ForegroundColor Yellow
-    Write-Host "  [5]  Configurar GPO Cierre Forzado de Sesion"     -ForegroundColor Yellow
-    Write-Host "  [6]  Configurar FSRM (Cuotas + Apantallamiento)"  -ForegroundColor Yellow
-    Write-Host "  [7]  Configurar AppLocker"                        -ForegroundColor Yellow
-    Write-Host "  [8]  Ejecutar TODO en orden automatico"           -ForegroundColor Green
+    Write-Host "  [1]  Instalar Requisitos (FSRM + GPMC)"           -ForegroundColor Yellow
+    Write-Host "  [2]  Crear Estructura AD (OUs + Grupos)"           -ForegroundColor Yellow
+    Write-Host "  [3]  Importar Usuarios desde CSV"                  -ForegroundColor Yellow
+    Write-Host "  [4]  Configurar Carpetas y Permisos NTFS"          -ForegroundColor Yellow
+    Write-Host "  [5]  Configurar GPO Cierre Forzado de Sesion"      -ForegroundColor Yellow
+    Write-Host "  [6]  Configurar FSRM (Cuotas + Apantallamiento)"   -ForegroundColor Yellow
+    Write-Host "  [7]  Configurar AppLocker"                         -ForegroundColor Yellow
+    Write-Host "  [8]  Ejecutar TODO en orden automatico"            -ForegroundColor Green
     Write-Host "  [9]  Forzar actualizacion de politicas (gpupdate)" -ForegroundColor Cyan
     Write-Host "  [0]  Salir"                                        -ForegroundColor Red
     Write-Host ""
@@ -92,8 +97,8 @@ function Crear-EstructuraAD {
 
     # --- Crear Grupos de Seguridad ---
     $grupos = @(
-        @{ Nombre = "Grupo_Cuates";    OU = "OU=Cuates,$dominioDN" },
-        @{ Nombre = "Grupo_NoCuates";  OU = "OU=No Cuates,$dominioDN" }
+        @{ Nombre = "Grupo_Cuates";   OU = "OU=Cuates,$dominioDN" },
+        @{ Nombre = "Grupo_NoCuates"; OU = "OU=No Cuates,$dominioDN" }
     )
     foreach ($g in $grupos) {
         $existe = Get-ADGroup -Filter "Name -eq '$($g.Nombre)'" -ErrorAction SilentlyContinue
@@ -116,7 +121,6 @@ function Importar-UsuariosCSV {
 
     $dominioDN = (Get-ADDomain).DistinguishedName
 
-    # Calcula el arreglo de bytes de horario con correccion UTC
     function Crear-HorarioBytes {
         param([int]$Inicio, [int]$Fin)
         [byte[]]$bytes = New-Object byte[] 21
@@ -142,8 +146,8 @@ function Importar-UsuariosCSV {
         return $bytes
     }
 
-    [byte[]]$horasCuates   = Crear-HorarioBytes -Inicio 8  -Fin 15   # 8AM - 3PM
-    [byte[]]$horasNoCuates = Crear-HorarioBytes -Inicio 15 -Fin 2    # 3PM - 2AM
+    [byte[]]$horasCuates   = Crear-HorarioBytes -Inicio 8  -Fin 15
+    [byte[]]$horasNoCuates = Crear-HorarioBytes -Inicio 15 -Fin 2
 
     $usuarios = Import-Csv $rutaCSV
     $total    = $usuarios.Count
@@ -162,11 +166,8 @@ function Importar-UsuariosCSV {
         $password = ConvertTo-SecureString $nPass -AsPlainText -Force
         $upn      = "$nUsuario@$((Get-ADDomain).Forest)"
 
-        # Eliminar usuario previo si existe
         $existe = Get-ADUser -Filter { SamAccountName -eq $nUsuario } -ErrorAction SilentlyContinue
-        if ($existe) {
-            Remove-ADUser -Identity $nUsuario -Confirm:$false
-        }
+        if ($existe) { Remove-ADUser -Identity $nUsuario -Confirm:$false }
 
         New-ADUser `
             -Name              $nUsuario `
@@ -284,14 +285,12 @@ function Configurar-FSRM {
     $rutaCuates   = "C:\Perfiles\Cuates"
     $rutaNoCuates = "C:\Perfiles\NoCuates"
 
-    # --- Asegurar directorios ---
     foreach ($ruta in @($rutaCuates, $rutaNoCuates)) {
         if (-not (Test-Path $ruta)) {
             New-Item -Path $ruta -ItemType Directory -Force | Out-Null
         }
     }
 
-    # --- Limpieza previa ---
     Write-Host "  Limpiando configuracion FSRM previa..." -ForegroundColor Yellow
     & dirquota quota    delete /path:$rutaBase /quiet /recursive 2>$null
     & dirquota autoquota delete /path:$rutaBase /quiet /recursive 2>$null
@@ -301,7 +300,6 @@ function Configurar-FSRM {
             Remove-FsrmFileScreen -Confirm:$false -ErrorAction SilentlyContinue
     }
 
-    # --- Grupo personalizado de extensiones bloqueadas ---
     Write-Host "  Creando grupo de extensiones bloqueadas: .exe .msi .mp3 .mp4..." -ForegroundColor Yellow
     $nombreGrupo = "Bloqueados_Practica8"
 
@@ -313,7 +311,6 @@ function Configurar-FSRM {
         -IncludePattern @("*.exe", "*.msi", "*.mp3", "*.mp4") `
         -ErrorAction    Stop | Out-Null
 
-    # --- Apantallamiento activo (Active Screening) ---
     New-FsrmFileScreen `
         -Path         $rutaBase `
         -IncludeGroup $nombreGrupo `
@@ -322,12 +319,10 @@ function Configurar-FSRM {
 
     Write-Host "  [OK] File Screen activo: bloqueados .exe / .msi / .mp3 / .mp4" -ForegroundColor Green
 
-    # --- Auto-cuotas para carpetas futuras ---
     Write-Host "  Aplicando auto-cuotas..." -ForegroundColor Yellow
     & dirquota autoquota add /path:$rutaCuates   /limit:10mb /type:hard | Out-Null
     & dirquota autoquota add /path:$rutaNoCuates /limit:5mb  /type:hard | Out-Null
 
-    # --- Cuotas manuales para usuarios ya existentes ---
     Write-Host "  Sincronizando cuotas en carpetas existentes..." -ForegroundColor Yellow
     $cc = 0; $cn = 0
 
@@ -348,55 +343,156 @@ function Configurar-FSRM {
     Write-Host "  [OK] FSRM configurado correctamente." -ForegroundColor Green
 }
 
-# ======================== FUNCION 7: APPLOCKER ========================
+# ======================== FUNCION 7: APPLOCKER (CORREGIDA) ========================
 
 function Configurar-AppLocker {
     Write-Host ""
-    Write-Host "  [7/8] Configurando AppLocker (Notepad bloqueado por Hash para NoCuates)..." -ForegroundColor Cyan
+    Write-Host "  [7/8] Configurando AppLocker..." -ForegroundColor Cyan
 
+    # --- Paso 1: Detener el servicio para aplicar cambios limpios ---
     Stop-Service -Name AppIDSvc -Force -ErrorAction SilentlyContinue
 
-    # Reglas base que permiten Windows y Program Files a todos
-    $xmlBase = @"
+    # --- Paso 2: Obtener SIDs reales de los grupos desde AD ---
+    $netbios     = (Get-ADDomain).NetBIOSName
+    $sidCuates   = (Get-ADGroup "Grupo_Cuates").SID.Value
+    $sidNoCuates = (Get-ADGroup "Grupo_NoCuates").SID.Value
+    $sidAdmins   = "S-1-5-32-544"  # SID universal de Administradores
+    $sidTodos    = "S-1-1-0"       # SID universal de Everyone
+
+    Write-Host "  SID Grupo_Cuates   : $sidCuates" -ForegroundColor Gray
+    Write-Host "  SID Grupo_NoCuates : $sidNoCuates" -ForegroundColor Gray
+
+    # --- Paso 3: Calcular el Hash real de notepad.exe ---
+    Write-Host "  Calculando Hash de notepad.exe..." -ForegroundColor Yellow
+    $notepadPath = "C:\Windows\System32\notepad.exe"
+    $hashInfo    = Get-AppLockerFileInformation -Path $notepadPath
+
+    # Extraer datos del hash para construir la regla XML manualmente
+    $hashData = $hashInfo.Hash
+    $hashStr  = $hashData.HashDataString      # El hash en hex
+    $hashLen  = (Get-Item $notepadPath).Length # Tamaño del archivo en bytes
+    $fileName = "notepad.exe"
+
+    Write-Host "  Hash obtenido: $hashStr" -ForegroundColor Gray
+
+    # --- Paso 4: Construir el XML completo de AppLocker ---
+    # Incluye:
+    #   - Allow %PROGRAMFILES%\* y %WINDIR%\* para todos (reglas base)
+    #   - Allow * para Administradores (regla base)
+    #   - Allow notepad.exe por Hash EXPLICITAMENTE para Grupo_Cuates
+    #   - Deny  notepad.exe por Hash EXPLICITAMENTE para Grupo_NoCuates
+    #
+    # NOTA: AppLocker da prioridad al Deny sobre el Allow cuando hay conflicto.
+    # Tener el Deny por Hash garantiza que aunque el usuario renombre el .exe,
+    # el bloqueo sigue activo porque se valida el contenido, no el nombre.
+
+    $xmlCompleto = @"
 <AppLockerPolicy Version="1">
   <RuleCollection Type="Exe" EnforcementMode="Enabled">
-    <FilePathRule Id="921cc481-6e17-4653-8f75-050b80acca20" Name="Permitir Program Files" Description="Regla por defecto" UserOrGroupSid="S-1-1-0" Action="Allow">
-      <Conditions><FilePathCondition Path="%PROGRAMFILES%\*" /></Conditions>
+
+    <!-- Regla base: Administradores pueden ejecutar cualquier cosa -->
+    <FilePathRule Id="fd686d83-a829-4351-8ff4-27c7de5755d2"
+                  Name="Permitir Administradores - Todo"
+                  Description="Regla base: admins sin restriccion"
+                  UserOrGroupSid="$sidAdmins"
+                  Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="*" />
+      </Conditions>
     </FilePathRule>
-    <FilePathRule Id="a61c8b2c-a319-4cd0-9690-d2177cad7e51" Name="Permitir Windows" Description="Regla por defecto" UserOrGroupSid="S-1-1-0" Action="Allow">
-      <Conditions><FilePathCondition Path="%WINDIR%\*" /></Conditions>
+
+    <!-- Regla base: Todos pueden ejecutar desde Program Files -->
+    <FilePathRule Id="921cc481-6e17-4653-8f75-050b80acca20"
+                  Name="Permitir Program Files - Todos"
+                  Description="Regla base"
+                  UserOrGroupSid="$sidTodos"
+                  Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="%PROGRAMFILES%\*" />
+      </Conditions>
     </FilePathRule>
-    <FilePathRule Id="fd686d83-a829-4351-8ff4-27c7de5755d2" Name="Permitir Administradores" Description="Regla por defecto" UserOrGroupSid="S-1-5-32-544" Action="Allow">
-      <Conditions><FilePathCondition Path="*" /></Conditions>
+
+    <!-- Regla base: Todos pueden ejecutar desde Windows -->
+    <FilePathRule Id="a61c8b2c-a319-4cd0-9690-d2177cad7e51"
+                  Name="Permitir Windows - Todos"
+                  Description="Regla base"
+                  UserOrGroupSid="$sidTodos"
+                  Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\*" />
+      </Conditions>
     </FilePathRule>
+
+    <!-- REGLA CLAVE: Grupo_Cuates PUEDE ejecutar Notepad por Hash -->
+    <!-- Esta regla es necesaria para que Cuates SI puedan usar Notepad -->
+    <!-- aunque la regla base de %WINDIR% ya los cubriria, la dejamos  -->
+    <!-- explicita para que quede documentada en la politica            -->
+    <FileHashRule Id="11111111-1111-1111-1111-111111111111"
+                  Name="PERMITIR Notepad - Grupo Cuates"
+                  Description="Cuates tienen permitido el Bloc de Notas"
+                  UserOrGroupSid="$sidCuates"
+                  Action="Allow">
+      <Conditions>
+        <FileHashCondition>
+          <FileHash Type="SHA256"
+                    Data="$hashStr"
+                    SourceFileLength="$hashLen"
+                    SourceFileName="$fileName" />
+        </FileHashCondition>
+      </Conditions>
+    </FileHashRule>
+
+    <!-- REGLA CLAVE: Grupo_NoCuates NO PUEDE ejecutar Notepad por Hash -->
+    <!-- El bloqueo por Hash es irrompible: renombrar el .exe no lo evita -->
+    <FileHashRule Id="22222222-2222-2222-2222-222222222222"
+                  Name="BLOQUEAR Notepad - Grupo NoCuates"
+                  Description="NoCuates tienen bloqueado el Bloc de Notas por Hash"
+                  UserOrGroupSid="$sidNoCuates"
+                  Action="Deny">
+      <Conditions>
+        <FileHashCondition>
+          <FileHash Type="SHA256"
+                    Data="$hashStr"
+                    SourceFileLength="$hashLen"
+                    SourceFileName="$fileName" />
+        </FileHashCondition>
+      </Conditions>
+    </FileHashRule>
+
   </RuleCollection>
 </AppLockerPolicy>
 "@
 
-    $rutaXML = "$env:TEMP\applocker_base.xml"
-    $xmlBase | Out-File -FilePath $rutaXML -Encoding UTF8
-    Set-AppLockerPolicy -XmlPolicy $rutaXML -ErrorAction SilentlyContinue
+    # --- Paso 5: Guardar y aplicar el XML ---
+    $rutaXML = "$env:TEMP\applocker_practica8.xml"
+    $xmlCompleto | Out-File -FilePath $rutaXML -Encoding UTF8
 
-    # Regla de DENEGACION por Hash para Notepad al grupo NoCuates
-    $netbios    = (Get-ADDomain).NetBIOSName
-    $polNotepad = Get-AppLockerFileInformation -Path "C:\Windows\System32\notepad.exe" |
-                  New-AppLockerPolicy -RuleType Hash -User "$netbios\Grupo_NoCuates" -ErrorAction SilentlyContinue
+    Set-AppLockerPolicy -XmlPolicy $rutaXML -ErrorAction Stop
+    Write-Host "  [OK] Politica AppLocker aplicada desde XML." -ForegroundColor Green
 
-    if ($polNotepad) {
-        foreach ($coleccion in $polNotepad.RuleCollections) {
-            foreach ($regla in $coleccion) {
-                $regla.Action = 'Deny'
-            }
-        }
-        Set-AppLockerPolicy -PolicyObject $polNotepad -Merge | Out-Null
-        Write-Host "  [OK] Notepad bloqueado por Hash para Grupo_NoCuates." -ForegroundColor Green
-    } else {
-        Write-Host "  [ADVERTENCIA] No se pudo generar la regla de Hash para Notepad." -ForegroundColor Yellow
-    }
-
-    # Habilitar e iniciar el servicio AppID
+    # --- Paso 6: Habilitar e iniciar el servicio AppID ---
     Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Services\AppIDSvc" -Name "Start" -Value 2 -ErrorAction SilentlyContinue
     Start-Service -Name AppIDSvc -ErrorAction SilentlyContinue
+    Write-Host "  [OK] Servicio AppIDSvc iniciado y configurado como automatico." -ForegroundColor Green
+
+    # --- Paso 7: Verificacion inmediata ---
+    Write-Host ""
+    Write-Host "  Verificando reglas aplicadas..." -ForegroundColor Yellow
+
+    $testCuates   = Get-AppLockerPolicy -Effective | Test-AppLockerPolicy -Path $notepadPath -User "$netbios\Grupo_Cuates"   2>$null
+    $testNoCuates = Get-AppLockerPolicy -Effective | Test-AppLockerPolicy -Path $notepadPath -User "$netbios\Grupo_NoCuates" 2>$null
+
+    if ($testCuates.PolicyDecision -eq "Allowed") {
+        Write-Host "  [OK] Grupo_Cuates   : Notepad PERMITIDO  ($($testCuates.PolicyDecision))" -ForegroundColor Green
+    } else {
+        Write-Host "  [!]  Grupo_Cuates   : resultado = $($testCuates.PolicyDecision) (revisar)" -ForegroundColor Yellow
+    }
+
+    if ($testNoCuates.PolicyDecision -eq "Denied") {
+        Write-Host "  [OK] Grupo_NoCuates : Notepad BLOQUEADO  ($($testNoCuates.PolicyDecision))" -ForegroundColor Green
+    } else {
+        Write-Host "  [!]  Grupo_NoCuates : resultado = $($testNoCuates.PolicyDecision) (revisar)" -ForegroundColor Yellow
+    }
 
     Write-Host "  [OK] AppLocker configurado correctamente." -ForegroundColor Green
 }
@@ -450,15 +546,15 @@ do {
     $opcion = Read-Host "  Ingresa tu opcion"
 
     switch ($opcion) {
-        "1" { Instalar-Requisitos;       Pausar }
-        "2" { Crear-EstructuraAD;        Pausar }
-        "3" { Importar-UsuariosCSV;      Pausar }
-        "4" { Configurar-CarpetasNTFS;   Pausar }
-        "5" { Configurar-GPO-Logoff;     Pausar }
-        "6" { Configurar-FSRM;           Pausar }
-        "7" { Configurar-AppLocker;      Pausar }
-        "8" { Ejecutar-Todo;             Pausar }
-        "9" { Forzar-GPUpdate;           Pausar }
+        "1" { Instalar-Requisitos;     Pausar }
+        "2" { Crear-EstructuraAD;      Pausar }
+        "3" { Importar-UsuariosCSV;    Pausar }
+        "4" { Configurar-CarpetasNTFS; Pausar }
+        "5" { Configurar-GPO-Logoff;   Pausar }
+        "6" { Configurar-FSRM;         Pausar }
+        "7" { Configurar-AppLocker;    Pausar }
+        "8" { Ejecutar-Todo;           Pausar }
+        "9" { Forzar-GPUpdate;         Pausar }
         "0" {
             Write-Host ""
             Write-Host "  Saliendo..." -ForegroundColor DarkGray
